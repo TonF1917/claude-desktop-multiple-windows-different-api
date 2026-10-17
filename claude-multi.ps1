@@ -7,7 +7,7 @@
 #>
 param(
   [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'uninstall', 'icons', 'providers')][string]$Command = 'gui',
-  [string]$Id, [string]$Name, [string]$Palette = 'violet', [string]$Provider, [string]$Profile, [string]$Url,
+  [string]$Id, [string]$Name, [string]$Kind, [string]$Palette = 'violet', [string]$Provider, [string]$Profile, [string]$Url, [string]$Proxy,
   [switch]$Force
 )
 $Root = $PSScriptRoot
@@ -44,17 +44,19 @@ switch ($Command) {
     if (-not $Id -or $Id -notmatch '^[A-Za-z0-9_-]+$') { throw '-Id is required (letters, digits, - _)' }
     $cfg = Read-Config
     if ($cfg.instances | Where-Object id -eq $Id) { throw "Instance '$Id' already exists" }
-    $new = [ordered]@{ id = $Id; name = $(if ($Name) { $Name } else { "Claude $Id" }); kind = 'cc-switch'; palette = $Palette }
+    $k = if ($Kind) { $Kind } else { 'cc-switch' }
+    $new = [ordered]@{ id = $Id; name = $(if ($Name) { $Name } else { "Claude $Id" }); kind = $k; palette = $Palette }
     if ($Provider) { $new.provider = $Provider }
     if ($Profile)  { $new.profile = $Profile }
+    if ($Proxy)    { $new.proxy = $Proxy }
     $cfg.instances = @($cfg.instances) + [pscustomobject]$new
     Save-Config $cfg
-    "added '$Id'. Run: .\claude-multi.ps1 install"
+    "added '$Id' ($k). Run: .\claude-multi.ps1 install"
   }
   'remove' {
     $cfg = Read-Config; $i = $cfg.instances | Where-Object id -eq $Id
     if (-not $i) { throw "No instance '$Id'" }
-    if ($i.kind -eq 'official') { throw 'The official instance cannot be removed (use uninstall).' }
+    if ($i.id -eq 'official') { throw 'The primary official instance cannot be removed (use uninstall).' }
     $lnk = Get-DesktopLink $i
     if (Test-Path $lnk) { Remove-Item $lnk }
     $cfg.instances = @($cfg.instances | Where-Object id -ne $Id); Save-Config $cfg

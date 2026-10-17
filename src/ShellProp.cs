@@ -24,6 +24,7 @@ public static class ShellProp {
   [DllImport("propsys.dll", CharSet = CharSet.Unicode)] static extern int PropVariantToStringAlloc(ref PROPVARIANT pv, out IntPtr s);
   [DllImport("ole32.dll")] static extern int PropVariantClear(ref PROPVARIANT pv);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool SetWindowText(IntPtr h, string title);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr LoadImage(IntPtr hi, string f, uint t, int cx, int cy, uint fl);
 
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();

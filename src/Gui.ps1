@@ -166,9 +166,12 @@ function Show-Manager {
     param($s, $e)
     try {
       if ($e.RowIndex -lt 0) { return }
-      $row = $grid.Rows[$e.RowIndex]; $col = $grid.Columns[$e.ColumnIndex].Name; $isOfficial = ([string]$row.Cells['id'].Value -eq 'official')
+      $row = $grid.Rows[$e.RowIndex]; $col = $grid.Columns[$e.ColumnIndex].Name
+      $instId = [string]$row.Cells['id'].Value; $instKind = [string]$row.Cells['kind'].Value
       if ($col -eq 'name') { [void]$grid.BeginEdit($false); return }
-      if ($isOfficial -or ($col -ne 'provider' -and $col -ne 'palette')) { return }
+      if ($col -eq 'provider' -and $instKind -eq 'official') { return }
+      if ($instId -eq 'official' -and $col -ne 'name') { return }
+      if ($col -ne 'provider' -and $col -ne 'palette') { return }
       $script:pickRow = $row; $script:pickMode = $col; $menu.Items.Clear()
       if ($col -eq 'provider') {
         foreach ($k in $provText.Keys) { if ($k -eq '__official') { continue }; $it = $menu.Items.Add([string]$provText[$k]); $it.Tag = [string]$k }
@@ -200,10 +203,12 @@ function Show-Manager {
     foreach ($row in $grid.Rows) {
       $i = $c.instances | Where-Object id -eq ([string]$row.Cells['id'].Value); if (-not $i) { continue }
       Set-Prop $i 'name' ([string]$row.Cells['name'].Value)
-      if ($i.kind -ne 'official') {
+      if ($i.id -ne 'official') {
         Set-Prop $i 'palette' ([string]$row.Cells['palette'].Value)
-        $pv = Get-ProvId ([string]$row.Cells['provider'].Value)
-        if ($pv) { Set-Prop $i 'provider' $pv } elseif ($i.PSObject.Properties['provider']) { $i.PSObject.Properties.Remove('provider') }
+        if ($i.kind -ne 'official') {
+          $pv = Get-ProvId ([string]$row.Cells['provider'].Value)
+          if ($pv) { Set-Prop $i 'provider' $pv } elseif ($i.PSObject.Properties['provider']) { $i.PSObject.Properties.Remove('provider') }
+        }
       }
     }
     $c.settings.syncSessions = $chkSync.Checked; $c.settings.syncSettings = $chkSet.Checked

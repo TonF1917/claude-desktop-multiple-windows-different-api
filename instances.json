@@ -1,4 +1,4 @@
-﻿{
+{
     "instances":  [
                       {
                           "id":  "official",
@@ -12,6 +12,12 @@
                           "name":  "Claude 3P",
                           "kind":  "cc-switch",
                           "palette":  "violet"
+                      },
+                      {
+                          "id":  "official2",
+                          "name":  "Claude Official 2",
+                          "kind":  "official",
+                          "palette":  "perplexity"
                       }
                   ],
     "settings":  {
@@ -20,6 +26,7 @@
                      "liveRefresh":  false,
                      "refreshOfficial":  false,
                      "language":  "en",
-                     "syncSettings":  true
+                     "syncSettings":  true,
+                     "notifyReload":  false
                  }
 }

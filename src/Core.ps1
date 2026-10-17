@@ -46,12 +46,15 @@ function Save-State($s) { New-Item -ItemType Directory -Force $StateDir | Out-Nu
 
 # ---------------------------------------------------------------- instance paths
 function Get-DataDir($i) {          # the Claude userData directory of an instance
-  if ($i.kind -eq 'official') { return $OfficialDir }
+  if ($i.kind -eq 'official') {
+    if ($i.id -eq 'official') { return $OfficialDir }
+    return (Join-Path $HomeRoot "$($i.id)\Data")
+  }
   if ($i.id -eq '3p') { return $SourceDir }                      # the primary 3P instance keeps the stock location
   Join-Path $HomeRoot "$($i.id)\Local\Claude-3p"
 }
 function Get-FakeLocal($i) { Join-Path $HomeRoot "$($i.id)\Local" }
-function Get-Aumid($i) { if ($i.kind -eq 'official') { $OfficialAumid } else { "ClaudeMulti.$($i.id)" } }
+function Get-Aumid($i) { if ($i.kind -eq 'official' -and $i.id -eq 'official') { $OfficialAumid } else { "ClaudeMulti.$($i.id)" } }
 function Get-IconPath($i) { Join-Path $IconDir "$($i.id).ico" }
 function Get-DesktopLink($i) { Join-Path ([Environment]::GetFolderPath('Desktop')) ($i.name + '.lnk') }
 function Get-Shim($i) { "`"$Wscript`" //B //Nologo `"$Root\run.vbs`" $($i.id)" }
@@ -64,11 +67,11 @@ function Get-ClaudeMains {          # every Claude Desktop main process (not hel
 }
 function Find-InstanceOf($proc, $instances) {
   foreach ($i in $instances) {
-    if ($i.kind -eq 'official') { continue }
+    if ($i.kind -eq 'official' -and $i.id -eq 'official') { continue }
     $dd = Get-DataDir $i
     if ($proc.CommandLine -match [regex]::Escape('--user-data-dir') -and $proc.CommandLine -match [regex]::Escape($dd)) { return $i }
   }
-  if ($proc.CommandLine -notmatch '--user-data-dir') { return ($instances | Where-Object kind -eq 'official' | Select-Object -First 1) }
+  if ($proc.CommandLine -notmatch '--user-data-dir') { return ($instances | Where-Object { $_.kind -eq 'official' -and $_.id -eq 'official' } | Select-Object -First 1) }
 }
 function Get-Roots($i) {
   $all = @((Read-Config).instances)
@@ -111,8 +114,8 @@ function Sync-Profile($i, $data) {   # give a non-primary instance its own copy 
 }
 
 # the official app must never read a cc-switch profile: give it a private LOCALAPPDATA whose Claude-3p is empty
-function Initialize-OfficialHome {
-  $h = Join-Path $HomeRoot 'official\Local'
+function Initialize-OfficialHome([string]$id = 'official') {
+  $h = Join-Path $HomeRoot "$id\Local"
   New-Item -ItemType Directory -Force (Join-Path $h 'Claude-3p') | Out-Null
   foreach ($n in 'Claude', 'Packages') {
     $real = Join-Path $RealLocal $n; $link = Join-Path $h $n
@@ -131,13 +134,50 @@ function Start-Agent {
 function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [switch]$Show) {
   $pkg = Get-ClaudePackage
   $exe = Join-Path $pkg.InstallLocation 'app\Claude.exe'
+  # 2026-10-17: direct CreateProcess on the WindowsApps exe started failing with
+  # "Access is denied" (ACLs unchanged - policy tightening on direct package-exe
+  # launches). The app execution alias is the sanctioned activation path and
+  # forwards the command line unchanged, so prefer it when present.
+  $aliasExe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\claude-desktop-msstore.exe'
+  if (Test-Path $aliasExe) { $exe = $aliasExe }
   $data = Get-DataDir $i
   $args_ = @()
   if ($Url) { $args_ += "`"$Url`"" }
   if (-not (Get-Roots $i)) { try { Apply-PendingSettings $i } catch { } }      # settings changed elsewhere while this instance was closed
   try {
+    if ($i.proxy) {
+      $env:HTTP_PROXY = $i.proxy; $env:HTTPS_PROXY = $i.proxy; $env:ALL_PROXY = $i.proxy
+    } else {
+      [Environment]::SetEnvironmentVariable('HTTP_PROXY', $null, 'Process')
+      [Environment]::SetEnvironmentVariable('HTTPS_PROXY', $null, 'Process')
+      [Environment]::SetEnvironmentVariable('ALL_PROXY', $null, 'Process')
+    }
     if ($i.kind -eq 'official') {
-      if ($i.isolate -ne $false) { $env:LOCALAPPDATA = Initialize-OfficialHome }
+      if ($i.id -eq 'official') {
+        if ($i.isolate -ne $false) { $env:LOCALAPPDATA = Initialize-OfficialHome }
+      } else {
+        if ($i.isolate -ne $false) { $env:LOCALAPPDATA = Initialize-OfficialHome $i.id }
+        New-Item -ItemType Directory -Force $data | Out-Null
+        $cfgLib = Join-Path $data 'configLibrary'
+        if (Test-Path $cfgLib) { Remove-Item -Path $cfgLib -Recurse -Force }
+        # Sync claude_desktop_config.json (MCP tools, Nowledge-mem)
+        $canonicalCfg = Join-Path $OfficialDir 'claude_desktop_config.json'
+        $instCfg = Join-Path $data 'claude_desktop_config.json'
+        if ((Test-Path $canonicalCfg) -and -not (Test-Path $instCfg)) {
+          try { & cmd.exe /c mklink /H "`"$instCfg`"" "`"$canonicalCfg`"" | Out-Null }
+          catch { Copy-Item -Path $canonicalCfg -Destination $instCfg -Force }
+        }
+        if ((Read-Config).settings.syncSessions -ne $false) {
+          foreach ($sessDir in 'claude-code-sessions', 'local-agent-mode-sessions') {
+            $realSess = Join-Path $OfficialDir $sessDir
+            $linkSess = Join-Path $data $sessDir
+            if ((Test-Path $realSess) -and -not (Test-Path $linkSess)) {
+              & cmd.exe /c mklink /J "`"$linkSess`"" "`"$realSess`"" | Out-Null
+            }
+          }
+        }
+        $args_ = @("--user-data-dir=`"$data`"") + $args_
+      }
     } else {
       $primary = ($data -eq $SourceDir)
       $profileTime = if ($primary) { Get-NewestWrite (Join-Path $SourceDir 'configLibrary') }
@@ -147,7 +187,12 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
     }
     if ($Minimized) { [void][ShellProp]::StartMinNoActivate($exe, ($args_ -join ' ')) }
     elseif ($args_.Count) { Start-Process $exe -ArgumentList $args_ } else { Start-Process $exe }
-  } finally { $env:LOCALAPPDATA = $RealLocal }
+  } finally {
+    $env:LOCALAPPDATA = $RealLocal
+    [Environment]::SetEnvironmentVariable('HTTP_PROXY', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('HTTPS_PROXY', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('ALL_PROXY', $null, 'Process')
+  }
   if (-not $NoAgent) { Start-Agent }
   if ($Show -and -not $Minimized) {       # the user asked for this window: bring it up even if it was sitting minimised
     for ($k = 0; $k -lt 40; $k++) {
@@ -165,7 +210,7 @@ function Update-Icons($instances, [switch]$Force) {
     $path = Get-IconPath $i
     if ((Test-Path $path) -and -not $Force) { continue }
     if (-not $base) { $base = Get-IconBase $pkg }
-    if ($i.kind -eq 'official' -or $i.palette -eq 'official') { Save-Ico $base $path }
+    if ($i.palette -eq 'official' -or ($i.id -eq 'official' -and -not $i.palette)) { Save-Ico $base $path }
     else { Save-Ico (Convert-IconBase $base (Resolve-Palette $i.palette $pal)) $path }
     "icon: $path"
   }
@@ -191,7 +236,7 @@ function Install-All([switch]$Force) {
   $inst = @((Read-Config).instances)
   Update-Icons $inst -Force:$Force
   foreach ($i in $inst) {
-    if ($i.kind -eq 'official') {
+    if ($i.kind -eq 'official' -and $i.id -eq 'official') {
       $links = @(Get-OfficialLinks | Where-Object { Test-Path $_ })
       if (-not $links) { $links = @(Join-Path ([Environment]::GetFolderPath('Desktop')) 'Claude.lnk') }
       foreach ($l in $links) { Set-Link $l $i }
@@ -392,11 +437,12 @@ function Update-Staleness($i, $m) {
 }
 $script:IdentApplied = @{}
 function Set-InstanceIdentity($i, $m, $p) {
-  if ($i.kind -eq 'official' -or -not $p -or $p.MainWindowHandle -eq 0) { return }
+  if (($i.kind -eq 'official' -and $i.id -eq 'official') -or -not $p -or $p.MainWindowHandle -eq 0) { return }
   $ico = Get-IconPath $i; $stamp = if (Test-Path $ico) { (Get-Item $ico).LastWriteTimeUtc.Ticks } else { 0 }
   if ([ShellProp]::GetWindowAumid($p.MainWindowHandle) -ne (Get-Aumid $i) -or $script:IdentApplied[$m.ProcessId] -ne $stamp) {
     [void][ShellProp]::SetWindowIdentity($p.MainWindowHandle, (Get-Aumid $i), (Get-Shim $i), "$ico,0", $i.name)
     [ShellProp]::SetWindowIcon($p.MainWindowHandle, $ico); $script:IdentApplied[$m.ProcessId] = $stamp
+    [void][ShellProp]::SetWindowText($p.MainWindowHandle, "Claude - $($i.name)")
   }
   [void][TrayIcon]::Apply([uint32]$m.ProcessId, $ico, $i.name)        # tray (notification area) icon + tooltip
 }

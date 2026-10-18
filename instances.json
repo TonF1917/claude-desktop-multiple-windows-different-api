@@ -17,7 +17,8 @@
                           "id":  "official2",
                           "name":  "Claude Official 2",
                           "kind":  "official",
-                          "palette":  "perplexity"
+                          "palette":  "perplexity",
+                          "timezone":  "America/Toronto"
                       }
                   ],
     "settings":  {

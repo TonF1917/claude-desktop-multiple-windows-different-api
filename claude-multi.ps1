@@ -7,7 +7,7 @@
 #>
 param(
   [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'uninstall', 'icons', 'providers')][string]$Command = 'gui',
-  [string]$Id, [string]$Name, [string]$Kind, [string]$Palette = 'violet', [string]$Provider, [string]$Profile, [string]$Url, [string]$Proxy,
+  [string]$Id, [string]$Name, [string]$Kind, [string]$Palette = 'violet', [string]$Provider, [string]$Profile, [string]$Url, [string]$Proxy, [string]$Timezone,
   [switch]$Force
 )
 $Root = $PSScriptRoot
@@ -49,6 +49,7 @@ switch ($Command) {
     if ($Provider) { $new.provider = $Provider }
     if ($Profile)  { $new.profile = $Profile }
     if ($Proxy)    { $new.proxy = $Proxy }
+    if ($Timezone) { $new.timezone = $Timezone }
     $cfg.instances = @($cfg.instances) + [pscustomobject]$new
     Save-Config $cfg
     "added '$Id' ($k). Run: .\claude-multi.ps1 install"

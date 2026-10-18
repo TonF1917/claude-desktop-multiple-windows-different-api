@@ -145,6 +145,11 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
   if ($Url) { $args_ += "`"$Url`"" }
   if (-not (Get-Roots $i)) { try { Apply-PendingSettings $i } catch { } }      # settings changed elsewhere while this instance was closed
   try {
+    if ($i.timezone) {
+      $env:TZ = $i.timezone
+    } else {
+      [Environment]::SetEnvironmentVariable('TZ', $null, 'Process')
+    }
     if ($i.proxy) {
       $env:HTTP_PROXY = $i.proxy; $env:HTTPS_PROXY = $i.proxy; $env:ALL_PROXY = $i.proxy
     } else {
@@ -189,6 +194,7 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
     elseif ($args_.Count) { Start-Process $exe -ArgumentList $args_ } else { Start-Process $exe }
   } finally {
     $env:LOCALAPPDATA = $RealLocal
+    [Environment]::SetEnvironmentVariable('TZ', $null, 'Process')
     [Environment]::SetEnvironmentVariable('HTTP_PROXY', $null, 'Process')
     [Environment]::SetEnvironmentVariable('HTTPS_PROXY', $null, 'Process')
     [Environment]::SetEnvironmentVariable('ALL_PROXY', $null, 'Process')

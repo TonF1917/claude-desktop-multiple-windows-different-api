@@ -18,7 +18,8 @@
                           "name":  "Claude Official 2",
                           "kind":  "official",
                           "palette":  "perplexity",
-                          "timezone":  "America/Toronto"
+                          "proxy":  "http://127.0.0.1:7891",
+                          "timezone":  "Asia/Jakarta"
                       }
                   ],
     "settings":  {

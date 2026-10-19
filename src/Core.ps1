@@ -131,6 +131,62 @@ function Start-Agent {
   Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$Root\claude-multi.ps1`"", 'agent'
 }
 
+function Initialize-InstanceEnv($i) {
+  $data = Get-DataDir $i
+  if (-not (Test-Path $data)) { New-Item -ItemType Directory -Force $data | Out-Null }
+  if ($i.kind -eq 'official') {
+    if ($i.id -ne 'official') {
+      Initialize-OfficialHome $i.id | Out-Null
+      $cfgLib = Join-Path $data 'configLibrary'
+      if (Test-Path $cfgLib) { Remove-Item -Path $cfgLib -Recurse -Force }
+    }
+  } else {
+    $fake = Get-FakeLocal $i
+    if (-not (Test-Path $fake)) { New-Item -ItemType Directory -Force (Join-Path $fake 'Claude-3p') | Out-Null }
+    if ($data -ne $SourceDir) { Sync-Profile $i $data | Out-Null }
+  }
+
+  # Link/sync claude_desktop_config.json (MCP tools, Nowledge Mem)
+  $canonicalCfg = Join-Path $OfficialDir 'claude_desktop_config.json'
+  $instCfg = Join-Path $data 'claude_desktop_config.json'
+  if ((Test-Path $canonicalCfg) -and -not (Test-Path $instCfg)) {
+    try { & cmd.exe /c mklink /H "`"$instCfg`"" "`"$canonicalCfg`"" | Out-Null }
+    catch { Copy-Item -Path $canonicalCfg -Destination $instCfg -Force }
+  }
+
+  # Link sessions & agent storage if enabled
+  if ((Read-Config).settings.syncSessions -ne $false) {
+    foreach ($sessDir in 'claude-code-sessions', 'local-agent-mode-sessions') {
+      $realSess = Join-Path $OfficialDir $sessDir
+      $linkSess = Join-Path $data $sessDir
+      if ((Test-Path $realSess) -and -not (Test-Path $linkSess)) {
+        & cmd.exe /c mklink /J "`"$linkSess`"" "`"$realSess`"" | Out-Null
+      }
+    }
+  }
+
+  # Generate colored icon and create/wire shortcuts
+  Update-Icons @($i) -Force
+  if ($i.kind -eq 'official' -and $i.id -eq 'official') {
+    foreach ($l in @(Get-OfficialLinks | Where-Object { Test-Path $_ })) { Set-Link $l $i }
+  } else {
+    Set-Link (Get-DesktopLink $i) $i
+    Update-PinnedLinks $i
+  }
+
+  [pscustomobject]@{
+    Id              = $i.id
+    Name            = $i.name
+    Kind            = $i.kind
+    DataDir         = $data
+    DataDirExists   = (Test-Path $data)
+    MCPConfigExists = (Test-Path $instCfg)
+    SessionsLinked  = (Test-Path (Join-Path $data 'claude-code-sessions'))
+    IconFile        = (Get-IconPath $i)
+    DesktopShortcut = (Get-DesktopLink $i)
+  }
+}
+
 function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [switch]$Show) {
   $pkg = Get-ClaudePackage
   $exe = Join-Path $pkg.InstallLocation 'app\Claude.exe'

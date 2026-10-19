@@ -41,6 +41,7 @@ cd claude-desktop-multiple-windows-different-api
 | `gui` | 管理界面 |
 | `add -Id off2 -Name "Claude Official 2" -Kind official -Palette perplexity [-Proxy <url>] [-Timezone <tz>]` | 增加次级官方直连窗口(支持独立配色、代理分流与进程时区隔离) |
 | `add -Id gem -Name "Claude Gemini" -Palette gemini [-Provider <id>] [-Proxy <url>] [-Timezone <tz>]` | 增加第三方窗口(配色可用名称或 `"#E11D48"`) |
+| `init [-Id <id>]` (别名 `setup`) | 一键物理构建/修复实例环境(建立独立Data目录、镜像MCP配置、挂载会话软链接、生成专属配色图标与快捷方式) |
 | `install [-Force]` | 重新生成图标和快捷方式;并改接你已固定的 Claude 快捷方式 |
 | `launch -Id gem` | 启动某个窗口 |
 | `list`、`providers`、`sync`、`remove -Id gem`、`icons -Force`、`uninstall` | 日常维护 |

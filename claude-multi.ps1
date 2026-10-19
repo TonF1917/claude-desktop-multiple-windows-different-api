@@ -6,7 +6,7 @@
 .EXAMPLE   .\claude-multi.ps1 launch -Id 3p
 #>
 param(
-  [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'uninstall', 'icons', 'providers')][string]$Command = 'gui',
+  [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'init', 'setup', 'uninstall', 'icons', 'providers')][string]$Command = 'gui',
   [string]$Id, [string]$Name, [string]$Kind, [string]$Palette = 'violet', [string]$Provider, [string]$Profile, [string]$Url, [string]$Proxy, [string]$Timezone,
   [switch]$Force
 )
@@ -52,7 +52,14 @@ switch ($Command) {
     if ($Timezone) { $new.timezone = $Timezone }
     $cfg.instances = @($cfg.instances) + [pscustomobject]$new
     Save-Config $cfg
-    "added '$Id' ($k). Run: .\claude-multi.ps1 install"
+    $envInfo = Initialize-InstanceEnv (Get-Instance $Id)
+    "Added '$Id' ($k) and initialized environment:`nDataDir: $($envInfo.DataDir)`nShortcut: $($envInfo.DesktopShortcut)"
+  }
+  { $_ -in 'init', 'setup' } {
+    $cfg = Read-Config
+    $targets = if ($Id) { @(Get-Instance $Id) } else { @($cfg.instances) }
+    $res = foreach ($i in $targets) { Initialize-InstanceEnv $i }
+    $res | Format-Table -AutoSize
   }
   'remove' {
     $cfg = Read-Config; $i = $cfg.instances | Where-Object id -eq $Id

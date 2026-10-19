@@ -63,6 +63,17 @@ python3 macos/claude_multi.py agent &      # session mirroring + silent backgrou
 
 Not ported yet on macOS: pin/MCP sync, `claude://` routing, tray icon, official-window isolation (launching Claude from the Dock while cc-switch has a third-party profile applied can switch it to third-party mode).
 
+## Multi-Official Account Support & Anti-Risk Isolation
+
+In addition to 1 Official + N Third-Party windows, the tool now fully supports **running multiple official subscription accounts (1P) and third-party accounts (3P) concurrently side-by-side**:
+
+1. **Pure Direct Multi-Official Connections**: The primary official instance uses the default home directory. Secondary official instances (e.g., `official2`) get isolated virtual data directories and private `LOCALAPPDATA` with empty `Claude-3p`, completely stripping `configLibrary` checks to guarantee 100% pure 1P direct connections without session collisions.
+2. **Dedicated Network & Proxy Isolation (`-Proxy`)**: Bypasses the client-side block on `--proxy-server` by dynamically injecting `$env:HTTPS_PROXY` at the child-process level. Assigns dedicated residential proxy exits per account to prevent multi-account IP association bans.
+3. **Process-Level Timezone Alignment (`-Timezone`)**: Dynamically injects `$env:TZ` (e.g. `America/Toronto`, `Asia/Jakarta`) into the child process. The Electron / V8 JavaScript layer aligns 100% with the egress IP's physical location **without mutating Windows system timezone**, eliminating cross-regional mismatch flags.
+4. **Automated Provisioning & Egress Audit (`init` & `check`)**:
+   - `.\claude-multi.ps1 init [-Id <id>]`: Provisions the complete environment in one click (creates Data dir, mirrors MCP `claude_desktop_config.json`, junctions `claude-code-sessions`, and generates tinted icons and shortcuts).
+   - `.\claude-multi.ps1 check [-Id <id>]`: Audits all instances' egress IP, residential/datacenter status, fraud risk score (0-100), Claude regional support, and timezone alignment.
+
 ## Using cc-switch
 
 Choose a *Claude Desktop* provider in cc-switch (not "Official"). cc-switch starts its gateway on `127.0.0.1:15721` and writes the profile into the shared 3P config folder. Windows that **follow** cc-switch use that gateway and its *currently selected* provider. Windows with a **specific provider** get a profile built from that provider's own base URL, key and model routes and talk to its upstream directly (Anthropic-format providers only; model ids are the real upstream ids). That is how two windows use two different APIs at the same moment. A hand-written profile can be set per window with `"profile": "path\\to\\profile.json"` (see `examples/profile.example.json`).

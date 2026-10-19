@@ -63,6 +63,17 @@ python3 macos/claude_multi.py agent &      # 会话镜像 + 后台静默刷新
 
 macOS 上尚未移植:固定/MCP 同步、`claude://` 路由、托盘图标、官方窗口隔离(cc-switch 应用了第三方配置时,从 Dock 启动的 Claude 可能被切成第三方模式)。
 
+## 多官方账号支持与防风控隔离 (Anti-Ban & Multi-Official)
+
+不仅支持 1 个官方 + N 个第三方，现已全面支持**任意多个官方订阅账号（1P）与第三方账号（3P）并排同时运行**：
+
+1. **多官方账号纯净直连**：主官方实例占用系统默认家目录；次级官方实例（如 `official2`）拥有专属虚拟数据目录与独立的私有 `LOCALAPPDATA`，彻底剔除 `configLibrary` 判定，保证 100% 进入纯官方 1P 直连模式，互不顶号。
+2. **独立网络与代理分流 (`-Proxy`)**：绕过客户端严禁 `--proxy-server` 命令行参数的封锁限制，在子进程级动态注入 `$env:HTTPS_PROXY`，为每个官方账号分配独立的住宅代理出口，杜绝多账号同 IP 关联连坐。
+3. **进程级时区对齐 (`-Timezone`)**：子进程独立注入 `$env:TZ`（如 `America/Toronto`、`Asia/Jakarta`），使 Electron / V8 渲染层的 JavaScript 时区与出口 IP 物理归属地 100% 吻合，且**绝不修改 Windows 全局系统时区**，消除“IP 与时区跨区冲突”的致命风控特征。
+4. **一键物理构建与环境审计 (`init` & `check`)**：
+   - `.\claude-multi.ps1 init [-Id <id>]`：一键自动创建 Data 目录、镜像 MCP 工具链 (`claude_desktop_config.json`)、建立会话软链接 (`claude-code-sessions`) 并生成着色图标与快捷方式。
+   - `.\claude-multi.ps1 check [-Id <id>]`：一键全量审计所有实例的出口 IP、住宅/机房属性、欺诈分 (0-100)、Claude 官方支持状态与时区吻合度。
+
 ## 配合 cc-switch 使用
 
 在 cc-switch 里为 Claude Desktop 选择第三方供应商(不要选「官方」)。cc-switch 会在 `127.0.0.1:15721` 启动网关,并把配置写入共用的 3P 配置目录。**跟随**的窗口走这个网关和 cc-switch *当前选中*的供应商。选了**具体供应商**的窗口,会用该供应商自己的 base URL、密钥、模型映射生成配置,直连其上游(仅限 Anthropic 格式供应商;模型名使用上游真实 id)。两个窗口就这样在同一时刻用两个不同的 API。也可以为某个窗口手写配置:`"profile": "路径\\profile.json"`(见 `examples/profile.example.json`)。

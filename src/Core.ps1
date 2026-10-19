@@ -187,6 +187,64 @@ function Initialize-InstanceEnv($i) {
   }
 }
 
+function Test-InstancePurity($i) {
+  $proxy = if ($i.proxy) { $i.proxy } else { "http://127.0.0.1:7890" }
+  $tzExpected = $i.timezone
+
+  $rawIp = $null
+  try {
+    $rawIp = curl.exe -x $proxy -s "https://api.ipify.org" --connect-timeout 8
+    if (-not $rawIp -or $rawIp -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+      $rawIp = (Invoke-RestMethod -Uri "https://api.ipify.org" -Proxy $proxy -TimeoutSec 8)
+    }
+  } catch {
+    $rawIp = $null
+  }
+
+  if (-not $rawIp) {
+    return [pscustomobject]@{
+      Id            = $i.id
+      Name          = $i.name
+      Proxy         = $proxy
+      ExitIP        = 'Connection Failed'
+      Location      = 'Unknown'
+      IPType        = 'Unknown'
+      RiskScore     = 'N/A'
+      ClaudeStatus  = 'Unreachable'
+      TimezoneMatch = 'N/A'
+    }
+  }
+
+  $riskInfo = try { Invoke-RestMethod -Uri "https://api.ipquery.io/$rawIp" -TimeoutSec 8 } catch { $null }
+  $geoInfo  = try { Invoke-RestMethod -Uri "http://ip-api.com/json/$rawIp" -TimeoutSec 8 } catch { $null }
+
+  $city = if ($geoInfo) { "$($geoInfo.city), $($geoInfo.countryCode)" } else { "Unknown" }
+  $isRes = if ($riskInfo) { if ($riskInfo.risk.is_datacenter) { 'Datacenter' } else { 'Residential' } } else { 'Unknown' }
+  $riskScore = if ($riskInfo) { "$($riskInfo.risk.risk_score)/100" } else { 'Unknown' }
+  $ipTz = if ($geoInfo) { $geoInfo.timezone } else { 'Unknown' }
+
+  $supportedCc = @('US', 'CA', 'GB', 'ID', 'JP', 'SG', 'DE', 'FR', 'AU')
+  $isSupported = if ($geoInfo) { if ($geoInfo.countryCode -in $supportedCc) { 'Supported' } else { 'Restricted' } } else { 'Unknown' }
+
+  $tzMatched = if ($tzExpected) {
+    if ($ipTz -eq $tzExpected) { 'Matched (100%)' } else { "Mismatch ($ipTz)" }
+  } else {
+    "Not Set ($ipTz)"
+  }
+
+  [pscustomobject]@{
+    Id            = $i.id
+    Name          = $i.name
+    Proxy         = $proxy
+    ExitIP        = $rawIp
+    Location      = $city
+    IPType        = $isRes
+    RiskScore     = $riskScore
+    ClaudeStatus  = $isSupported
+    TimezoneMatch = $tzMatched
+  }
+}
+
 function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [switch]$Show) {
   $pkg = Get-ClaudePackage
   $exe = Join-Path $pkg.InstallLocation 'app\Claude.exe'

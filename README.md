@@ -42,6 +42,7 @@ Then right-click each new Desktop shortcut and choose **Pin to taskbar** (Window
 | `add -Id off2 -Name "Claude Official 2" -Kind official -Palette perplexity [-Proxy <url>] [-Timezone <tz>]` | add a secondary official direct window (supports custom tint, dedicated proxy & process timezone) |
 | `add -Id gem -Name "Claude Gemini" -Palette gemini [-Provider <id>] [-Proxy <url>] [-Timezone <tz>]` | add a third-party window (any palette name or `"#E11D48"`) |
 | `init [-Id <id>]` (alias `setup`) | provision/repair instance environment (creates Data dir, mirrors MCP config, junctions sessions, generates tinted icon & desktop shortcut) |
+| `check [-Id <id>]` (alias `test-ip`) | audit instance egress IP, residential/datacenter status, risk score (0-100), Claude region eligibility & timezone alignment |
 | `install [-Force]` | (re)build icons and shortcuts; rewires your existing pinned Claude shortcuts |
 | `launch -Id gem` | start a window |
 | `list`, `providers`, `sync`, `remove -Id gem`, `icons -Force`, `uninstall` | housekeeping |

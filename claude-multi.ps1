@@ -6,7 +6,7 @@
 .EXAMPLE   .\claude-multi.ps1 launch -Id 3p
 #>
 param(
-  [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'init', 'setup', 'uninstall', 'icons', 'providers')][string]$Command = 'gui',
+  [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'init', 'setup', 'check', 'test-ip', 'purity', 'uninstall', 'icons', 'providers')][string]$Command = 'gui',
   [string]$Id, [string]$Name, [string]$Kind, [string]$Palette = 'violet', [string]$Provider, [string]$Profile, [string]$Url, [string]$Proxy, [string]$Timezone,
   [switch]$Force
 )
@@ -59,6 +59,13 @@ switch ($Command) {
     $cfg = Read-Config
     $targets = if ($Id) { @(Get-Instance $Id) } else { @($cfg.instances) }
     $res = foreach ($i in $targets) { Initialize-InstanceEnv $i }
+    $res | Format-Table -AutoSize
+  }
+  { $_ -in 'check', 'test-ip', 'purity' } {
+    $cfg = Read-Config
+    $targets = if ($Id) { @(Get-Instance $Id) } else { @($cfg.instances) }
+    "Auditing instance egress IP, proxy purity, and timezone alignment..."
+    $res = foreach ($i in $targets) { Test-InstancePurity $i }
     $res | Format-Table -AutoSize
   }
   'remove' {

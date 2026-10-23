@@ -5,6 +5,8 @@
                           "name":  "Claude",
                           "kind":  "official",
                           "palette":  "official",
+                          "proxy":  "http://127.0.0.1:27894",
+                          "timezone":  "America/Toronto",
                           "isolate":  true
                       },
                       {
@@ -18,8 +20,8 @@
                           "name":  "Claude Official 2",
                           "kind":  "official",
                           "palette":  "perplexity",
-                          "proxy":  null,
-                          "timezone":  "America/Toronto"
+                          "proxy":  "http://127.0.0.1:27892",
+                          "timezone":  "America/Los_Angeles"
                       }
                   ],
     "settings":  {

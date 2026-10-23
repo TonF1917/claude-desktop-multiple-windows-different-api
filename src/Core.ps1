@@ -296,6 +296,9 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
           }
         }
         $args_ = @("--user-data-dir=`"$data`"") + $args_
+        if ($i.proxy) {
+          $args_ += "--proxy-server=`"$($i.proxy)`""
+        }
       }
     } else {
       $primary = ($data -eq $SourceDir)
@@ -304,6 +307,13 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
       # a running window is never killed here: a changed profile applies on the next restart (Restart button / quit and reopen)
       $args_ = @("--user-data-dir=`"$data`"") + $args_
     }
+    # 2026-10-20: Chromium/Electron 的 WebRTC 默认走裸 UDP，完全绕过 --proxy-server。
+    # 有效开关是 webrtc-ip-handling-policy（Chrome 156 实证；--force-webrtc- 变体不存在）。
+    # 同时补 official 分支缺失的 --proxy-server：Chromium 在 Windows 不读 HTTP(S)_PROXY 环境变量。
+    if ($i.proxy -and -not (($args_ -join ' ') -match '--proxy-server')) {
+      $args_ += "--proxy-server=`"$($i.proxy)`""
+    }
+    $args_ += '--webrtc-ip-handling-policy=disable_non_proxied_udp'
     if ($Minimized) { [void][ShellProp]::StartMinNoActivate($exe, ($args_ -join ' ')) }
     elseif ($args_.Count) { Start-Process $exe -ArgumentList $args_ } else { Start-Process $exe }
   } finally {

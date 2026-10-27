@@ -47,21 +47,41 @@ cd claude-desktop-multiple-windows-different-api
 | `launch -Id gem` | 启动某个窗口 |
 | `list`、`providers`、`sync`、`remove -Id gem`、`icons -Force`、`uninstall` | 日常维护 |
 
-## macOS(实验性)
+## macOS(实验性,v1.1.0)
 
-macOS 版在 [`macos/`](macos) 目录(只需 Xcode 命令行工具自带的 Python 3,仅用标准库)。它是**在没有 Mac 的条件下写成的**:配置、配色、图标重绘、cc-switch 配置、会话镜像和界面已在 Windows 上跑通;只能在 macOS 上执行的步骤(克隆 `Claude.app`、`codesign`、`open`、`iconutil`)是按这些工具的文档行为编写的,**未在真机上运行过**。欢迎带着终端输出来反馈问题。
+macOS 版在 [`macos/`](macos) 目录(Python 3,仅用标准库),现已对齐 Windows 版功能:多官方窗口、每窗口独立的 `kind` / `proxy` / `timezone`、`init` / `check`,以及覆盖全部选项的图形界面。
+
+> **如实说明:** 它是**在没有 Mac 的条件下写成的**。配置读写、配色、代理/时区/启动参数的生成、凭据脱敏、出口检测(用模拟应答)、`init` 的文件准备和图形界面已在 Windows 上跑通;只能在 macOS 上执行的步骤——克隆 `Claude.app`(`cp -c`)、`sips` / `iconutil` 重绘图标、ad-hoc `codesign`、直接启动克隆体二进制、用 `ps` 识别进程——是按这些工具的文档行为编写的,**从未在真机上运行过**。可能有粗糙之处,欢迎带着终端输出反馈。
+
+**获取:** 下载 `ClaudeMulti-macOS-vX.Y.Z.zip`(由 `macos/build_release.sh` 生成),解压后双击 `Claude Multi.command`(首次请右键 -> 打开);或在克隆的仓库里:
 
 ```bash
-git clone https://github.com/TonF1917/claude-desktop-multiple-windows-different-api
-cd claude-desktop-multiple-windows-different-api
 python3 macos/claude_multi.py gui
-python3 macos/claude_multi.py add --id gem --name "Claude Gemini" --palette gemini
-python3 macos/claude_multi.py install      # 每个额外窗口一份带配色图标的 Claude.app APFS 克隆(~/Applications/Claude Multi)
-python3 macos/claude_multi.py launch --id gem
-python3 macos/claude_multi.py agent &      # 会话镜像 + 后台静默刷新
+python3 macos/claude_multi.py add --id off2 --kind official --palette perplexity --proxy http://127.0.0.1:7890 --timezone America/Toronto
+python3 macos/claude_multi.py add --id gem --name "Claude Gemini" --palette gemini [--provider <cc-switch id>]
+python3 macos/claude_multi.py init [--id off2]    # 数据目录、MCP 配置链接、会话链接、带配色图标的 Claude.app 克隆(~/Applications/Claude Multi)
+python3 macos/claude_multi.py check [--id off2]   # 出口 IP、家宽/机房、风险分、区域、时区吻合度
+python3 macos/claude_multi.py launch --id off2    # 另有:stop、restart、list、remove、install、uninstall、sync、providers
+python3 macos/claude_multi.py agent &             # 会话镜像 + 后台静默刷新
 ```
 
-macOS 上尚未移植:固定/MCP 同步、`claude://` 路由、托盘图标、官方窗口隔离(cc-switch 应用了第三方配置时,从 Dock 启动的 Claude 可能被切成第三方模式)。
+| 命令 | 作用 |
+|---|---|
+| `add --id --name --kind official/3p --palette --proxy --timezone [--provider] [--lang] [--no-init]` | 添加窗口(`3p` 与 Windows 一样存为 `cc-switch`) |
+| `init` / `setup` `[--id]` `[--force]` | 准备数据目录;镜像 `claude_desktop_config.json`(优先符号链接,其次硬链接,最后复制);链接 `claude-code-sessions` / `local-agent-mode-sessions`;生成带配色图标的克隆体。可重复执行 |
+| `check` / `test-ip` `[--id]` | 经该窗口代理查询出口 IP(仅 HTTP/HTTPS 代理,标准库 `urllib` 不支持 SOCKS)、IP 类型、风险分、Claude 区域、时区吻合度 |
+| `launch` / `stop` / `restart` `--id` | 运行窗口(见下) |
+| `list`、`remove --id`、`uninstall`、`install [--force]`、`sync`、`providers`、`agent`、`gui` | 日常维护 |
+
+**macOS 上启动时做了什么。** 直接执行窗口自己的二进制(主官方窗口用原版 `Claude.app`,其余窗口用各自的配色克隆体),环境变量才能真正传到进程里:
+
+* 由窗口的 `proxy` 注入 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`(含小写),并设 `NO_PROXY=localhost,127.0.0.1,::1`,保证本机 cc-switch 网关仍可直连。默认**不**加 `--proxy-server`(在窗口上设 `"proxyServerFlag": true` 才加)。macOS 上 Chromium 不一定遵守这些变量,请先用 `check` 和泄漏测试验证,再把账号交给它。
+* 仅对该进程设 `TZ=<时区>`,并按时区推导 `--lang=<语言区域>`(可用 `"lang"` 覆盖)。
+* `--webrtc-ip-handling-policy=disable_non_proxied_udp`;除主官方窗口外都带 `--user-data-dir=~/.claude-multi/<id>/Claude`。
+* 次级官方窗口(`--kind official` 且 id 不是 `official`)使用独立数据目录,每次启动前删除其中的 `configLibrary`,并且不会创建同级 `Claude-3p`,因此始终是纯 1P,不会读到 cc-switch 配置。
+* 代理账号密码在 `list`、图形界面、报错、输出面板和 `~/.claude-multi/claude-multi.log` 中一律脱敏(`http://***@host:port`);`instances.json` 和子进程环境里仍是明文。
+
+**限制 / 未移植:** 固定与 MCP 服务器同步、`claude://` 路由、托盘图标。主官方窗口无法像 Windows 那样与 cc-switch 隔离(macOS 没有可重定向的 `LOCALAPPDATA`):cc-switch 应用了第三方配置时启动它,可能被切成第三方模式。Xcode 自带的 `python3` 可能带旧版 Tk;`gui` 打不开时请安装 python.org 的 Python,或直接用命令行。
 
 ## 多官方账号支持与防风控隔离 (Anti-Ban & Multi-Official)
 

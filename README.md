@@ -47,21 +47,43 @@ Then right-click each new Desktop shortcut and choose **Pin to taskbar** (Window
 | `launch -Id gem` | start a window |
 | `list`, `providers`, `sync`, `remove -Id gem`, `icons -Force`, `uninstall` | housekeeping |
 
-## macOS - experimental
+The manager GUI exposes the same options: a kind selector next to *Add*, click-to-edit **Proxy** (credentials are masked in the grid and the output pane) and **Timezone** (common IANA zones or typed), **Init** / **Check** buttons that run in a background process and stream into an output pane, plus *Stop*.
 
-The port lives in [`macos/`](macos) (Python 3 from the Xcode Command Line Tools, standard library only). It was written **without access to a Mac**: configuration, palettes, icon recolouring, cc-switch profiles, session mirroring and the GUI are exercised on Windows; the macOS-only steps (cloning `Claude.app`, `codesign`, `open`, `iconutil`) follow the documented tool behaviour but have **not been run on real hardware**. Bug reports with the terminal output are very welcome.
+## macOS - experimental (v1.1.0)
+
+The port lives in [`macos/`](macos) (Python 3, standard library only) and now mirrors the Windows feature set: multiple official windows, per-window `kind` / `proxy` / `timezone`, `init` / `check`, and a GUI with every option.
+
+> **Honest status:** it was written **without access to a Mac**. Config handling, palettes, proxy / timezone / launch-argument planning, secret masking, the egress check (against stubbed answers), `init` file provisioning and the GUI are exercised on Windows. The macOS-only steps - cloning `Claude.app` (`cp -c`), `sips` / `iconutil` icon tinting, ad-hoc `codesign`, starting the cloned binary and process matching through `ps` - follow the documented tool behaviour but have **never been run on real hardware**. Expect rough edges and please send the terminal output.
+
+**Get it:** download `ClaudeMulti-macOS-vX.Y.Z.zip` (built by `macos/build_release.sh`), unzip, double-click `Claude Multi.command` (first time: right-click -> Open), or from a clone:
 
 ```bash
-git clone https://github.com/TonF1917/claude-desktop-multiple-windows-different-api
-cd claude-desktop-multiple-windows-different-api
 python3 macos/claude_multi.py gui
-python3 macos/claude_multi.py add --id gem --name "Claude Gemini" --palette gemini
-python3 macos/claude_multi.py install      # one tinted APFS clone of Claude.app per extra window (~/Applications/Claude Multi)
-python3 macos/claude_multi.py launch --id gem
-python3 macos/claude_multi.py agent &      # session mirroring + silent background refresh
+python3 macos/claude_multi.py add --id off2 --kind official --palette perplexity --proxy http://127.0.0.1:7890 --timezone America/Toronto
+python3 macos/claude_multi.py add --id gem --name "Claude Gemini" --palette gemini [--provider <cc-switch id>]
+python3 macos/claude_multi.py init [--id off2]    # data dir, MCP-config link, session link, tinted Claude.app clone (~/Applications/Claude Multi)
+python3 macos/claude_multi.py check [--id off2]   # egress IP, residential/datacenter, risk, region, timezone alignment
+python3 macos/claude_multi.py launch --id off2    # also: stop, restart, list, remove, install, uninstall, sync, providers
+python3 macos/claude_multi.py agent &             # session mirroring + silent background refresh
 ```
 
-Not ported yet on macOS: pin/MCP sync, `claude://` routing, tray icon, official-window isolation (launching Claude from the Dock while cc-switch has a third-party profile applied can switch it to third-party mode).
+| Command | What it does |
+|---|---|
+| `add --id --name --kind official/3p --palette --proxy --timezone [--provider] [--lang] [--no-init]` | add a window (`3p` is stored as `cc-switch`, like on Windows) |
+| `init` / `setup` `[--id]` `[--force]` | provision the data dir; mirror `claude_desktop_config.json` (symlink, else hardlink, else copy); link `claude-code-sessions` / `local-agent-mode-sessions`; build the tinted clone. Idempotent |
+| `check` / `test-ip` `[--id]` | exit IP through the window's proxy (HTTP/HTTPS proxies only - `urllib` has no SOCKS), IP type, risk score, Claude region, timezone match |
+| `launch` / `stop` / `restart` `--id` | run the window (see below) |
+| `list`, `remove --id`, `uninstall`, `install [--force]`, `sync`, `providers`, `agent`, `gui` | housekeeping |
+
+**What a launch does on macOS.** The window's own binary is executed directly (the primary official window runs the stock `Claude.app`; every other window runs its tinted clone), so the environment really reaches the process:
+
+* `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (+ lower-case) from the window's `proxy`, with `NO_PROXY=localhost,127.0.0.1,::1` so the local cc-switch gateway stays reachable. `--proxy-server` is **not** added by default (set `"proxyServerFlag": true` on a window to add it). Chromium on macOS does not necessarily honour these variables for page traffic - verify with `check` / a leak test before trusting an account to it.
+* `TZ=<timezone>` for that process only, plus `--lang=<locale>` derived from the timezone (override with `"lang"`).
+* `--webrtc-ip-handling-policy=disable_non_proxied_udp`; `--user-data-dir=~/.claude-multi/<id>/Claude` for every window except the primary official one.
+* Secondary official windows (`--kind official`, id other than `official`) get an isolated data dir, any `configLibrary` is deleted before every start, and the sibling `Claude-3p` is never created, so they stay pure 1P and never pick up a cc-switch profile.
+* Proxy credentials are masked (`http://***@host:port`) in `list`, the GUI, errors, the output pane and `~/.claude-multi/claude-multi.log`; they remain in plain text in `instances.json` and in the child's environment.
+
+**Limits / not ported:** pin / MCP-server sync, `claude://` routing and tray icon. The primary official window cannot be isolated from cc-switch like on Windows (there is no `LOCALAPPDATA` to redirect): launching it while cc-switch has a third-party profile applied can switch it to third-party mode. The `python3` from the Xcode tools may ship an old Tk; if `gui` fails, install Python from python.org or use the CLI.
 
 ## Multi-Official Account Support & Anti-Risk Isolation
 

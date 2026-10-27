@@ -1,5 +1,5 @@
 ﻿# WinForms manager in the Anthropic look (ivory / slate / clay, serif type): how many windows, which API and colour each one uses.
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing, Microsoft.VisualBasic
 if (-not ('Win32.Dpi' -as [type])) { Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();' -Name Dpi -Namespace Win32 }
 
 function Show-Manager {
@@ -23,6 +23,15 @@ function Show-Manager {
   $pal = Get-Palettes
   $palNames = @($pal.PSObject.Properties.Name)
   $providers = @(Get-CcProviders)
+  $commonTz = @('America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Toronto', 'America/Vancouver', 'America/Mexico_City', 'America/Sao_Paulo',
+                'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Madrid', 'Europe/Moscow', 'Asia/Jakarta', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Shanghai',
+                'Asia/Hong_Kong', 'Asia/Kolkata', 'Asia/Dubai', 'Australia/Sydney', 'Pacific/Auckland', 'UTC')
+  function Get-MaskedProxy([string]$p) { if ($p) { $p -replace '(://)[^/@\s]+@', '$1***@' } else { '' } }     # never show proxy credentials in the grid or the output pane
+  function Format-Proxy([string]$p) {       # '' = clear; 'host:port' becomes http://host:port; $null = invalid
+    $p = $p.Trim(); if (-not $p) { return '' }
+    if ($p -notmatch '://') { $p = "http://$p" }
+    if ($p -match '^(https?|socks4|socks5h?)://[^\s/]+:\d+/?$') { $p } else { $null }
+  }
   $snapshot = @{}; foreach ($i in $cfg.instances) { $snapshot[$i.id] = [string]$i.palette }
   $script:baseBmp = $null; $iconCache = @{}
 
@@ -64,7 +73,7 @@ function Show-Manager {
   $form = New-Object Windows.Forms.Form
   $form.Text = L 'Claude 多窗口管理器' 'Claude Multi-Window Manager'
   $form.Font = $fBody; $form.BackColor = $IVORY; $form.ForeColor = $SLATE; $form.StartPosition = 'CenterScreen'
-  $form.ClientSize = New-Object Drawing.Size(1240, 860); $form.MinimumSize = New-Object Drawing.Size(1240, 860); $form.MaximizeBox = $false
+  $form.ClientSize = New-Object Drawing.Size(1240, 990); $form.MinimumSize = New-Object Drawing.Size(1240, 990); $form.MaximizeBox = $false
   $form.FormBorderStyle = 'FixedSingle'
 
   # ---- header: clay burst + serif title
@@ -86,10 +95,10 @@ function Show-Manager {
     $form.Close() })
 
   # ---- windows table card
-  $cardGrid = New-Card 24 108 850 470
+  $cardGrid = New-Card 24 108 850 480
   $lblGrid = New-Label (L '窗口' 'Windows') 20 10 300 34 $fHead $SLATE
   $grid = New-Object Windows.Forms.DataGridView
-  $grid.Location = New-Object Drawing.Point(14, 54); $grid.Size = New-Object Drawing.Size(822, 404)
+  $grid.Location = New-Object Drawing.Point(14, 54); $grid.Size = New-Object Drawing.Size(822, 414)
   $grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false; $grid.RowHeadersVisible = $false; $grid.SelectionMode = 'FullRowSelect'; $grid.MultiSelect = $false
   $grid.AutoSizeColumnsMode = 'Fill'; $grid.BackgroundColor = [Drawing.Color]::White; $grid.BorderStyle = 'None'; $grid.CellBorderStyle = 'SingleHorizontal'; $grid.GridColor = $CLOUD
   $grid.RowTemplate.Height = 42; $grid.EditMode = 'EditOnKeystrokeOrF2'; $grid.EnableHeadersVisualStyles = $false
@@ -97,9 +106,10 @@ function Show-Manager {
   $grid.ColumnHeadersDefaultCellStyle.BackColor = [Drawing.Color]::White; $grid.ColumnHeadersDefaultCellStyle.ForeColor = $GRAY; $grid.ColumnHeadersDefaultCellStyle.Font = $fSmall
   $grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = [Drawing.Color]::White; $grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = $GRAY
   $grid.DefaultCellStyle.BackColor = [Drawing.Color]::White; $grid.DefaultCellStyle.ForeColor = $SLATE; $grid.DefaultCellStyle.SelectionBackColor = $SEL; $grid.DefaultCellStyle.SelectionForeColor = $SLATE
-  $cName = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cName.HeaderText = L '名称' 'Name'; $cName.Name = 'name'; $cName.FillWeight = 22
-  $cId = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cId.HeaderText = 'ID'; $cId.Name = 'id'; $cId.ReadOnly = $true; $cId.FillWeight = 10
-  $cProv = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cProv.ReadOnly = $true; $cProv.HeaderText = L '接口 / 供应商' 'API / provider'; $cProv.Name = 'provider'; $cProv.FillWeight = 34
+  $cName = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cName.HeaderText = L '名称' 'Name'; $cName.Name = 'name'; $cName.FillWeight = 18
+  $cId = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cId.HeaderText = 'ID'; $cId.Name = 'id'; $cId.ReadOnly = $true; $cId.FillWeight = 8
+  $cKind = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cKind.HeaderText = L '类型' 'Kind'; $cKind.Name = 'kind'; $cKind.ReadOnly = $true; $cKind.FillWeight = 11
+  $cProv = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cProv.ReadOnly = $true; $cProv.HeaderText = L '接口 / 供应商' 'API / provider'; $cProv.Name = 'provider'; $cProv.FillWeight = 22
   $provText = [ordered]@{ '__official' = (L '官方订阅' 'Official subscription'); '' = (L '跟随 cc-switch 当前选择' 'Follow cc-switch selection') }
   $provFmt = @{}
   foreach ($p in $providers) {
@@ -108,9 +118,11 @@ function Show-Manager {
     $provText[[string]$p.id] = ($p.name + $suffix)
   }
   function Get-ProvId([string]$text) { foreach ($k in $provText.Keys) { if ($provText[$k] -eq $text) { return [string]$k } }; '' }
-  $cPal = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cPal.HeaderText = L '配色(点击更改)' 'Colour (click)'; $cPal.Name = 'palette'; $cPal.ReadOnly = $true; $cPal.FillWeight = 18
-  $cStat = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cStat.HeaderText = L '状态' 'Status'; $cStat.Name = 'status'; $cStat.ReadOnly = $true; $cStat.FillWeight = 14
-  foreach ($col in @($cName, $cId, $cProv, $cPal, $cStat)) { [void]$grid.Columns.Add($col) }
+  $cPal = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cPal.HeaderText = L '配色(点击更改)' 'Colour (click)'; $cPal.Name = 'palette'; $cPal.ReadOnly = $true; $cPal.FillWeight = 12
+  $cStat = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cStat.HeaderText = L '状态' 'Status'; $cStat.Name = 'status'; $cStat.ReadOnly = $true; $cStat.FillWeight = 12
+  $cProxy = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cProxy.HeaderText = L '代理(点击编辑)' 'Proxy (click)'; $cProxy.Name = 'proxy'; $cProxy.ReadOnly = $true; $cProxy.FillWeight = 17
+  $cTz = New-Object Windows.Forms.DataGridViewTextBoxColumn; $cTz.HeaderText = L '时区(点击)' 'Timezone (click)'; $cTz.Name = 'tz'; $cTz.ReadOnly = $true; $cTz.FillWeight = 17
+  foreach ($col in @($cName, $cId, $cKind, $cProv, $cPal, $cProxy, $cTz, $cStat)) { [void]$grid.Columns.Add($col) }
 
   function Get-Swatch($spec) {
     if ($spec -eq 'official') { return (C '#D97757') }
@@ -124,9 +136,12 @@ function Show-Manager {
     $lum = 0.3 * $c.R + 0.59 * $c.G + 0.11 * $c.B; $fc = if ($lum -gt 150) { $SLATE } else { [Drawing.Color]::White }
     $row.Cells['palette'].Style.ForeColor = $fc; $row.Cells['palette'].Style.SelectionForeColor = $fc
   }
+  function Set-ProxyCell($row, [string]$p) { $row.Cells['proxy'].Tag = $p; $row.Cells['proxy'].Value = (Get-MaskedProxy $p) }
+  function Set-TzCell($row, [string]$tz) { $row.Cells['tz'].Tag = $tz; $row.Cells['tz'].Value = $tz }
   function Add-InstanceRow($i) {
     $idx = $grid.Rows.Add(); $r = $grid.Rows[$idx]
-    $r.Cells['name'].Value = $i.name; $r.Cells['id'].Value = $i.id
+    $r.Cells['name'].Value = $i.name; $r.Cells['id'].Value = $i.id; $r.Cells['kind'].Value = $(if ($i.kind -eq 'official') { 'official' } else { '3p' })
+    Set-ProxyCell $r ([string]$i.proxy); Set-TzCell $r ([string]$i.timezone)
     if ($i.kind -eq 'official') {
       $r.Cells['provider'].Value = $provText['__official']; $r.Cells['provider'].ReadOnly = $true; Set-PaletteCell $r 'official'
     } else {
@@ -139,7 +154,7 @@ function Show-Manager {
   foreach ($ctl in @($lblGrid, $grid)) { $cardGrid.Controls.Add($ctl) }
 
   # ---- icon preview card + actions
-  $cardSide = New-Card 894 108 322 470
+  $cardSide = New-Card 894 108 322 480
   $pic = New-Object Windows.Forms.PictureBox; $pic.Location = New-Object Drawing.Point(20, 18); $pic.Size = New-Object Drawing.Size(96, 96); $pic.SizeMode = 'Zoom'; $pic.BackColor = [Drawing.Color]::White
   $lblPrev = New-Label (L '图标预览' 'Icon preview') 128 20 180 34 $fHead $SLATE
   $lblPrev2 = New-Label (L '用于桌面、任务栏、系统托盘' 'Desktop, taskbar and tray') 128 58 188 56 $fSmall $GRAY
@@ -169,8 +184,23 @@ function Show-Manager {
       $row = $grid.Rows[$e.RowIndex]; $col = $grid.Columns[$e.ColumnIndex].Name
       $instId = [string]$row.Cells['id'].Value; $instKind = [string]$row.Cells['kind'].Value
       if ($col -eq 'name') { [void]$grid.BeginEdit($false); return }
+      if ($col -eq 'proxy') {
+        $cur = [string]$row.Cells['proxy'].Tag
+        $in = [Microsoft.VisualBasic.Interaction]::InputBox((L '代理地址 http://[用户:密码@]主机:端口(留空 = 不使用代理)' 'Proxy http://[user:pass@]host:port (empty = no proxy)'), $row.Cells['name'].Value, $cur)
+        if ($in -eq $cur) { return }
+        $np = Format-Proxy $in
+        if ($null -eq $np) { Set-Status (L '代理格式无效,未修改。' 'Invalid proxy URL, unchanged.'); return }
+        Set-ProxyCell $row $np; return
+      }
+      if ($col -eq 'tz') {
+        $script:pickRow = $row; $script:pickMode = 'tz'; $menu.Items.Clear()
+        $it = $menu.Items.Add((L '(系统时区)' '(system timezone)')); $it.Tag = '*none'
+        foreach ($z in $commonTz) { $it = $menu.Items.Add($z); $it.Tag = $z }
+        $it = $menu.Items.Add((L '手动输入…' 'Type manually...')); $it.Tag = '*custom'
+        $menu.Show($grid, $grid.PointToClient([Windows.Forms.Cursor]::Position)); return
+      }
       if ($col -eq 'provider' -and $instKind -eq 'official') { return }
-      if ($instId -eq 'official' -and $col -ne 'name') { return }
+      if ($instId -eq 'official') { return }
       if ($col -ne 'provider' -and $col -ne 'palette') { return }
       $script:pickRow = $row; $script:pickMode = $col; $menu.Items.Clear()
       if ($col -eq 'provider') {
@@ -185,6 +215,15 @@ function Show-Manager {
     param($s, $e)
     try {
       $tag = [string]$e.ClickedItem.Tag
+      if ($script:pickMode -eq 'tz') {
+        if ($tag -eq '*none') { Set-TzCell $script:pickRow '' }
+        elseif ($tag -eq '*custom') {
+          $in = ([Microsoft.VisualBasic.Interaction]::InputBox((L 'IANA 时区,例如 Asia/Jakarta' 'IANA timezone, e.g. Asia/Jakarta'), $script:pickRow.Cells['name'].Value, [string]$script:pickRow.Cells['tz'].Tag)).Trim()
+          if ($in -and $in -notmatch '^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+){0,2}$') { Set-Status (L '时区格式无效,未修改。' 'Invalid timezone, unchanged.'); return }
+          Set-TzCell $script:pickRow $in
+        } else { Set-TzCell $script:pickRow $tag }
+        return
+      }
       if ($script:pickMode -eq 'provider') {
         if ($tag -and $provFmt[$tag] -and $provFmt[$tag] -ne 'anthropic') {
           [void][Windows.Forms.MessageBox]::Show((L '该供应商使用非 Anthropic 接口,必须经 cc-switch 网关,不能直连。' 'This provider is not Anthropic-format and must go through the cc-switch gateway; it cannot be used directly.'))
@@ -203,6 +242,10 @@ function Show-Manager {
     foreach ($row in $grid.Rows) {
       $i = $c.instances | Where-Object id -eq ([string]$row.Cells['id'].Value); if (-not $i) { continue }
       Set-Prop $i 'name' ([string]$row.Cells['name'].Value)
+      foreach ($pair in @(@('proxy', 'proxy'), @('timezone', 'tz'))) {
+        $v = [string]$row.Cells[$pair[1]].Tag
+        if ($v) { Set-Prop $i $pair[0] $v } elseif ($i.PSObject.Properties[$pair[0]]) { $i.PSObject.Properties.Remove($pair[0]) }
+      }
       if ($i.id -ne 'official') {
         Set-Prop $i 'palette' ([string]$row.Cells['palette'].Value)
         if ($i.kind -ne 'official') {
@@ -217,14 +260,16 @@ function Show-Manager {
     $c
   }
 
-  $numAdd = New-Object Windows.Forms.NumericUpDown; $numAdd.Location = New-Object Drawing.Point(20, 134); $numAdd.Size = New-Object Drawing.Size(62, 28); $numAdd.Minimum = 1; $numAdd.Maximum = 20; $numAdd.Value = 1; $numAdd.Font = $fBody
-  $btnAdd = New-Btn (L '添加窗口' 'Add windows') 92 128 210 $false {
-    $c = Read-Config
+  $numAdd = New-Object Windows.Forms.NumericUpDown; $numAdd.Location = New-Object Drawing.Point(20, 134); $numAdd.Size = New-Object Drawing.Size(56, 28); $numAdd.Minimum = 1; $numAdd.Maximum = 20; $numAdd.Value = 1; $numAdd.Font = $fBody
+  $cmbKind = New-Object Windows.Forms.ComboBox; $cmbKind.DropDownStyle = 'DropDownList'; $cmbKind.Location = New-Object Drawing.Point(84, 134); $cmbKind.Size = New-Object Drawing.Size(104, 28); $cmbKind.Font = $fSmall; $cmbKind.FlatStyle = 'Flat'
+  [void]$cmbKind.Items.Add((L '第三方' '3P')); [void]$cmbKind.Items.Add((L '官方' 'Official')); $cmbKind.SelectedIndex = 0
+  $btnAdd = New-Btn (L '添加窗口' 'Add') 196 128 106 $false {
+    $c = Read-Config; $official = ($cmbKind.SelectedIndex -eq 1)
     for ($k = 0; $k -lt [int]$numAdd.Value; $k++) {
       $n = 2; while ($c.instances | Where-Object id -eq "x$n") { $n++ }
       $used = @($c.instances | ForEach-Object { [string]$_.palette })
       $p = ($palNames | Where-Object { $used -notcontains $_ } | Select-Object -First 1); if (-not $p) { $p = $palNames[$n % $palNames.Count] }
-      $new = [pscustomobject]@{ id = "x$n"; name = "Claude 3P $n"; kind = 'cc-switch'; palette = $p }
+      $new = [pscustomobject]@{ id = "x$n"; name = $(if ($official) { "Claude Official $n" } else { "Claude 3P $n" }); kind = $(if ($official) { 'official' } else { 'cc-switch' }); palette = $p }
       $c.instances = @($c.instances) + $new; Add-InstanceRow $new; Save-Config $c
     } }
   $btnRemove = New-Btn (L '删除所选' 'Remove selected') 20 172 282 $false {
@@ -239,24 +284,59 @@ function Show-Manager {
     foreach ($i in $c.instances) { if ($snapshot[$i.id] -ne [string]$i.palette) { Remove-Item (Get-IconPath $i) -ErrorAction SilentlyContinue; $snapshot[$i.id] = [string]$i.palette } }
     Save-Config $c; Install-All | Out-Null; $form.Cursor = 'Default'
     Set-Status (L '已应用。新快捷方式在桌面,右键即可固定到任务栏。' 'Applied. New shortcuts are on the Desktop - right-click to pin them to the taskbar.') }
-  $btnRestart = New-Btn (L '重启所选(载入新会话)' 'Restart selected (reload sessions)') 20 260 282 $false {
+  # Init / Check run `claude-multi.ps1 init|check` in a hidden child process whose output is polled into the output pane (check does network I/O: never on the UI thread)
+  $script:jobs = New-Object Collections.ArrayList
+  function Start-CliJob([string]$label, [string]$command, [string]$id) {
+    $out = [IO.Path]::GetTempFileName(); $err = $out + '.err'
+    $al = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$Root\claude-multi.ps1`"", $command, '-Id', $id)
+    $p = Start-Process powershell.exe -ArgumentList $al -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+    [void]$script:jobs.Add(@{ proc = $p; out = $out; err = $err; label = $label; id = $id; shown = '' })
+    $txtOut.AppendText("`r`n> $command -Id $id`r`n"); Set-Status ("$label ...")
+  }
+  function Read-Shared([string]$path) {
+    try { $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite'); try { (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() } } catch { '' }
+  }
+  function Update-Jobs {
+    foreach ($j in @($script:jobs)) {
+      $t = Read-Shared $j.out
+      $done = $j.proc.HasExited
+      if ($done) { $e = Read-Shared $j.err; if ($e.Trim()) { $t += "`r`n" + $e } }
+      $t = Get-MaskedProxy $t
+      if ($t.Length -gt $j.shown.Length) { $txtOut.AppendText(($t.Substring($j.shown.Length) -replace "(?<!\r)\n", "`r`n")); $j.shown = $t }
+      if ($done) { Remove-Item $j.out, $j.err -ErrorAction SilentlyContinue; [void]$script:jobs.Remove($j); Set-Status ("$($j.label) - " + (L '完成' 'done')) }
+    }
+  }
+  $btnInit = New-Btn (L '初始化' 'Init') 20 260 137 $false {
+    $r = $grid.CurrentRow; if (-not $r) { return }
+    Save-Config (Read-GridConfig); Start-CliJob (L '初始化' 'Init') 'init' ([string]$r.Cells['id'].Value) }
+  $btnCheck = New-Btn (L '检测 IP' 'Check') 165 260 137 $false {
+    $r = $grid.CurrentRow; if (-not $r) { return }
+    Save-Config (Read-GridConfig); Start-CliJob (L '检测 IP' 'Check') 'check' ([string]$r.Cells['id'].Value) }
+  $btnRestart = New-Btn (L '重启所选(载入新会话)' 'Restart selected (reload sessions)') 20 304 282 $false {
     $r = $grid.CurrentRow; if (-not $r) { return }
     $inst = Get-Instance ([string]$r.Cells['id'].Value)
     if (-not @(Get-Roots $inst)) { [void][Windows.Forms.MessageBox]::Show((L '该窗口没有在运行。' 'That window is not running.')); return }
     if ([Windows.Forms.MessageBox]::Show((L '将重启该窗口以载入其他窗口的新会话/固定项。窗口里未发送的草稿会丢失。继续?' 'This restarts the window so it loads new sessions and pins from the other windows. Unsent drafts in it are lost. Continue?'), '', 'YesNo') -ne 'Yes') { return }
     $form.Cursor = 'WaitCursor'; Save-Config (Read-GridConfig); Restart-Instance $inst $null; $form.Cursor = 'Default' }
-  $btnLaunch = New-Btn (L '启动所选' 'Launch selected') 20 316 282 $true {
+  $btnLaunch = New-Btn (L '启动所选' 'Launch selected') 20 348 282 $true {
     $r = $grid.CurrentRow; if (-not $r) { return }
     Save-Config (Read-GridConfig); Invoke-Launch (Get-Instance ([string]$r.Cells['id'].Value)) -Show }
-  $btnAll = New-Btn (L '全部启动' 'Launch all') 20 360 282 $false {
+  $btnStop = New-Btn (L '停止' 'Stop') 20 392 137 $false {
+    $r = $grid.CurrentRow; if (-not $r) { return }
+    $inst = Get-Instance ([string]$r.Cells['id'].Value); $roots = @(Get-Roots $inst)
+    if (-not $roots) { [void][Windows.Forms.MessageBox]::Show((L '该窗口没有在运行。' 'That window is not running.')); return }
+    if ([Windows.Forms.MessageBox]::Show((L '将强制结束该窗口,未发送的草稿会丢失。继续?' 'This force-closes the window; unsent drafts are lost. Continue?'), '', 'YesNo') -ne 'Yes') { return }
+    foreach ($rt in $roots) { & taskkill.exe /F /T /PID $rt.ProcessId | Out-Null }
+    Set-Status (L '已停止。' 'Stopped.') }
+  $btnAll = New-Btn (L '全部启动' 'Launch all') 165 392 137 $false {
     Save-Config (Read-GridConfig); foreach ($i in (Read-Config).instances) { Invoke-Launch $i; Start-Sleep -Seconds 2 } }
-  $btnSync = New-Btn (L '立即同步会话' 'Sync sessions now') 20 404 282 $false {
+  $btnSync = New-Btn (L '立即同步会话' 'Sync sessions now') 20 436 282 $false {
     $form.Cursor = 'WaitCursor'; Backup-Sessions; Initialize-SessionStores; $n = Invoke-SessionSync; $form.Cursor = 'Default'
     Set-Status (L "已同步 $n 个文件。" "Synced $n file(s).") }
-  foreach ($ctl in @($pic, $lblPrev, $lblPrev2, $numAdd, $btnAdd, $btnRemove, $btnApply, $btnRestart, $btnLaunch, $btnAll, $btnSync)) { $cardSide.Controls.Add($ctl) }
+  foreach ($ctl in @($pic, $lblPrev, $lblPrev2, $numAdd, $cmbKind, $btnAdd, $btnRemove, $btnApply, $btnInit, $btnCheck, $btnRestart, $btnLaunch, $btnStop, $btnAll, $btnSync)) { $cardSide.Controls.Add($ctl) }
 
   # ---- sync & behaviour card
-  $cardSet = New-Card 24 594 1192 242
+  $cardSet = New-Card 24 600 1192 242
   $lblSet = New-Label (L '同步与行为' 'Sync and behaviour') 20 10 400 34 $fHead $SLATE
   $chkSync = New-Check (L '在各窗口间同步会话(后台)' 'Sync sessions across windows (background)') 18 48 1150 ([bool]$cfg.settings.syncSessions)
   $chkSet = New-Check (L '同步固定(置顶)/星标会话的顺序与 MCP 服务器' 'Sync pinned / starred sessions, pin order and MCP servers') 18 80 1150 ([bool]$cfg.settings.syncSettings)
@@ -272,7 +352,13 @@ function Show-Manager {
   $hint = New-Label $hintText 20 208 1150 26 $fSmall $GRAY
   foreach ($ctl in @($lblSet, $chkSync, $chkSet, $chkLive, $chkOff, $chkNote, $lblProto, $cmbProto, $hint)) { $cardSet.Controls.Add($ctl) }
 
-  foreach ($ctl in @($burst, $lblTitle, $lblSub, $lblStatus, $lblLang, $cmbLang, $cardGrid, $cardSide, $cardSet)) { $form.Controls.Add($ctl) }
+  # ---- output pane (Init / Check)
+  $cardOut = New-Card 24 854 1192 124
+  $lblOut = New-Label (L '输出' 'Output') 20 6 300 28 $fHead $SLATE
+  $txtOut = New-Object Windows.Forms.TextBox; $txtOut.Multiline = $true; $txtOut.ReadOnly = $true; $txtOut.ScrollBars = 'Vertical'; $txtOut.Location = New-Object Drawing.Point(14, 36); $txtOut.Size = New-Object Drawing.Size(1164, 78)
+  $txtOut.BackColor = $IVORY; $txtOut.ForeColor = $SLATE; $txtOut.BorderStyle = 'None'; $txtOut.Font = New-Object Drawing.Font('Consolas', 9)
+  foreach ($ctl in @($lblOut, $txtOut)) { $cardOut.Controls.Add($ctl) }
+  foreach ($ctl in @($burst, $lblTitle, $lblSub, $lblStatus, $lblLang, $cmbLang, $cardGrid, $cardSide, $cardSet, $cardOut)) { $form.Controls.Add($ctl) }
 
   # ---- live status
   $timer = New-Object Windows.Forms.Timer; $timer.Interval = 3000
@@ -283,7 +369,10 @@ function Show-Manager {
       foreach ($row in $grid.Rows) { $id = [string]$row.Cells['id'].Value; $row.Cells['status'].Value = $(if ($map.ContainsKey($id)) { (L '运行中 ' 'running ') + $map[$id] } else { '' }) }
     } catch { } })
   $timer.Start()
+  $jobTimer = New-Object Windows.Forms.Timer; $jobTimer.Interval = 400
+  $jobTimer.Add_Tick({ try { if ($script:jobs.Count) { Update-Jobs } } catch { } })
+  $jobTimer.Start()
   $form.Add_Shown({ Show-Preview })
   [void]$form.ShowDialog()
-  $timer.Stop()
+  $timer.Stop(); $jobTimer.Stop()
 }

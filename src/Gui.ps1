@@ -26,7 +26,7 @@ function Show-Manager {
   $commonTz = @('America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Toronto', 'America/Vancouver', 'America/Mexico_City', 'America/Sao_Paulo',
                 'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Madrid', 'Europe/Moscow', 'Asia/Jakarta', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Shanghai',
                 'Asia/Hong_Kong', 'Asia/Kolkata', 'Asia/Dubai', 'Australia/Sydney', 'Pacific/Auckland', 'UTC')
-  function Get-MaskedProxy([string]$p) { if ($p) { $p -replace '(://)[^/@\s]+@', '$1***@' } else { '' } }     # never show proxy credentials in the grid or the output pane
+  function Get-MaskedProxy([string]$p) { if ($p) { $p -replace '(://)[^/\s]*@', '$1***@' } else { '' } }     # never show proxy credentials in the grid or the output pane
   function Format-Proxy([string]$p) {       # '' = clear; 'host:port' becomes http://host:port; $null = invalid
     $p = $p.Trim(); if (-not $p) { return '' }
     if ($p -notmatch '://') { $p = "http://$p" }
@@ -290,7 +290,7 @@ function Show-Manager {
     $out = [IO.Path]::GetTempFileName(); $err = $out + '.err'
     $al = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$Root\claude-multi.ps1`"", $command, '-Id', $id)
     $p = Start-Process powershell.exe -ArgumentList $al -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-    [void]$script:jobs.Add(@{ proc = $p; out = $out; err = $err; label = $label; id = $id; shown = '' })
+    [void]$script:jobs.Add(@{ proc = $p; out = $out; err = $err; label = $label; id = $id; off = 0 })
     $txtOut.AppendText("`r`n> $command -Id $id`r`n"); Set-Status ("$label ...")
   }
   function Read-Shared([string]$path) {
@@ -298,11 +298,14 @@ function Show-Manager {
   }
   function Update-Jobs {
     foreach ($j in @($script:jobs)) {
+      $done = $j.proc.HasExited                      # decide first, then read: everything written before the exit is then in the file
       $t = Read-Shared $j.out
-      $done = $j.proc.HasExited
-      if ($done) { $e = Read-Shared $j.err; if ($e.Trim()) { $t += "`r`n" + $e } }
-      $t = Get-MaskedProxy $t
-      if ($t.Length -gt $j.shown.Length) { $txtOut.AppendText(($t.Substring($j.shown.Length) -replace "(?<!\r)\n", "`r`n")); $j.shown = $t }
+      if ($done) { $e = Read-Shared $j.err; if ($e.Trim()) { $t += "`n" + $e } }
+      $cut = if ($done) { $t.Length } else { $t.LastIndexOf("`n") + 1 }       # only whole lines are shown, so a credential is never masked half-way
+      if ($cut -gt $j.off) {
+        $chunk = Get-MaskedProxy $t.Substring($j.off, $cut - $j.off)
+        $txtOut.AppendText(($chunk -replace "`r?`n", "`r`n")); $j.off = $cut
+      }
       if ($done) { Remove-Item $j.out, $j.err -ErrorAction SilentlyContinue; [void]$script:jobs.Remove($j); Set-Status ("$($j.label) - " + (L '完成' 'done')) }
     }
   }

@@ -47,7 +47,7 @@ class ClaudeMultiError(Exception):
 # ------------------------------------------------------------------ secrets hygiene
 def mask_secrets(text):
     """Hide `user:pass@` in anything that looks like a URL. Use on every string that is printed or logged."""
-    return re.sub(r'(://)[^/@\s]+@', r'\1***@', str(text))
+    return re.sub(r'(://)[^/\s]*@', r'\1***@', str(text))   # greedy: up to the LAST '@', so a password containing '@' is hidden entirely
 
 def mask_proxy(url):
     return mask_secrets(url) if url else ''
@@ -110,13 +110,19 @@ def read_config():
     for k, v in (('syncSessions', True), ('liveRefresh', True), ('refreshOfficial', False), ('language', 'en'), ('protocol', 'last')):
         s.setdefault(k, v)
     for i in c['instances']:
+        if not isinstance(i, dict) or not re.fullmatch(r'[A-Za-z0-9_-]+', str(i.get('id', ''))):
+            raise ClaudeMultiError(f"invalid instance id {str(i.get('id') if isinstance(i, dict) else i)[:40]!r} in {CONFIG.name} (letters, digits, - _ only)")
         i.setdefault('kind', 'cc-switch'); i.setdefault('name', f"Claude {i.get('id', '')}"); i.setdefault('palette', 'violet')
     return c
 
 def save_config(c):
     CONFIG.parent.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG.with_name(CONFIG.name + '.tmp')
-    tmp.write_text(json.dumps(c, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)      # may hold proxy credentials: owner-only on POSIX
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(c, indent=2, ensure_ascii=False) + '\n')
+    if os.name == 'posix':
+        os.chmod(tmp, 0o600)
     os.replace(tmp, CONFIG)
 
 def palettes():
@@ -377,19 +383,30 @@ def ensure_clone(i, force=False, out=print):
         info.pop('CFBundleURLTypes', None)
         plist_path.write_bytes(plistlib.dumps(info))
         sh('xattr', '-cr', str(tmp_app), check=False)
+        old = CLONES / f'.old-{i["id"]}.app'
+        shutil.rmtree(old, ignore_errors=True)
         if dst.exists():
-            shutil.rmtree(dst)
-        os.replace(tmp_app, dst)
+            os.replace(dst, old)
+        try:
+            os.replace(tmp_app, dst)
+        except Exception:
+            if old.exists():
+                os.replace(old, dst)                          # put the previous clone back
+            raise
+        shutil.rmtree(old, ignore_errors=True)
     except Exception:
         shutil.rmtree(tmp_app, ignore_errors=True)
         raise
+    signed = False
     if shutil.which('codesign'):
         r = sh('codesign', '--force', '--deep', '--sign', '-', str(dst), check=False)
-        if r.returncode != 0:
+        signed = r.returncode == 0
+        if not signed:
             out(f'warning: codesign failed - the clone may refuse to start ({mask_secrets(r.stderr.strip())[:200]})')
     else:
         out('warning: codesign not found (install the Xcode Command Line Tools: xcode-select --install) - the clone will likely not start')
-    stamp.write_text(want)
+    if signed:
+        stamp.write_text(want)                               # no stamp for an unsigned clone: the next launch/init retries
     return dst
 
 
@@ -579,7 +596,7 @@ def http_get(url, proxy=None, timeout=8):
     h = urllib.request.ProxyHandler({'http': proxy, 'https': proxy} if proxy else {})
     req = urllib.request.Request(url, headers={'User-Agent': 'claude-multi-check'})
     with urllib.request.build_opener(h).open(req, timeout=timeout) as r:
-        return r.read().decode('utf-8', 'replace')
+        return r.read(65536).decode('utf-8', 'replace')
 
 def check_instance(i, fetch=None):
     fetch = fetch or http_get; proxy = i.get('proxy'); expect = i.get('timezone')
@@ -755,7 +772,7 @@ def cmd_uninstall(a):
     n = 0
     if CLONES.is_dir():
         for app in CLONES.glob('*.app'):
-            if (app / 'Contents' / '.multi-version').exists() or app.name.startswith('.build-'):
+            if (app / 'Contents' / '.multi-version').exists() or app.name.startswith(('.build-', '.old-')):
                 shutil.rmtree(app, ignore_errors=True); print('removed', app); n += 1
         try: CLONES.rmdir()
         except OSError: pass

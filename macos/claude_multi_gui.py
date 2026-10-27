@@ -84,7 +84,7 @@ def build(core):
         fmt = p['meta'].get('apiFormat'); prov_fmt[p['id']] = fmt
         prov_text[p['id']] = p['name'] + (L('  (需经网关)', '  (needs the gateway)') if fmt and fmt != 'anthropic' else L('  (直连上游)', '  (direct)'))
     rows = {i['id']: dict(i) for i in cfg['instances']}
-    running_now = {}
+    running_now = {}; deleted = set()
     kind_text = {'official': L('官方', 'Official'), 'cc-switch': L('第三方', 'Third-party')}
 
     def refresh(keep=None):
@@ -133,7 +133,7 @@ def build(core):
     def commit_form(strict=False):
         """Write the form back into the selected row. Invalid proxy / timezone: raise when strict, else show in the status line."""
         iid = sel_id()
-        if not iid or loading[0]:
+        if not iid or loading[0] or iid not in rows:
             return True
         i = rows[iid]
         try:
@@ -255,14 +255,21 @@ def build(core):
 
     def save_all(strict=True):
         commit_form(strict)
-        c = core.read_config(); c['instances'] = [dict(r) for r in rows.values()]
+        c = core.read_config()
+        merged = [dict(r) for r in rows.values()]                      # our rows win for ids we know ...
+        merged += [i for i in c['instances'] if i['id'] not in rows and i['id'] not in deleted]     # ... windows added elsewhere meanwhile survive
+        c['instances'] = merged
         c['settings'].update(syncSessions=v_sync.get(), liveRefresh=v_live.get(), refreshOfficial=v_off.get()); core.save_config(c)
+        deleted.clear()
 
     def guarded(fn):
         def w(*a):
             try: fn(*a)
-            except core.ClaudeMultiError as e:
-                status(str(e), True); messagebox.showerror('', core.mask_secrets(e))
+            except Exception as e:                                    # user errors and bugs alike end up in the output pane, never in a silent Tk callback
+                msg = core.mask_secrets(e if str(e) else type(e).__name__)
+                if not isinstance(e, core.ClaudeMultiError):
+                    core.log_line(traceback.format_exc()); msg = f'{type(e).__name__}: {msg}'
+                emit('error: ' + msg); status(msg[:160], True); messagebox.showerror('', msg)
         return w
 
     def add(official):
@@ -278,7 +285,8 @@ def build(core):
         if core.is_primary(rows[iid]):
             messagebox.showinfo('', L('主官方窗口不能删除。', 'The primary official window cannot be removed.')); return
         if not messagebox.askyesno('', L('删除该窗口?(其数据目录保留)', 'Remove this window? (its data directory is kept)')): return
-        i = rows.pop(iid); save_all(); refresh()
+        commit_form(True)                                             # flush the form while the row still exists
+        i = rows.pop(iid); deleted.add(iid); tv.selection_set(()); save_all(); refresh()
         def work(out):
             app = core.clone_path(i)
             if app.exists(): core.shutil.rmtree(app, ignore_errors=True)
@@ -340,7 +348,7 @@ def build(core):
         bg(L('同步会话', 'Sync sessions'), lambda out: out(L('已同步 ', 'Synced ') + str(core.sync_sessions(core.read_config(), {})) + L(' 个文件', ' file(s)')))
 
     def list_refresh():
-        c = core.read_config(); rows.clear(); rows.update({i['id']: dict(i) for i in c['instances']}); refresh(); load_form(); status(L('列表已刷新。', 'List refreshed.'))
+        c = core.read_config(); deleted.clear(); rows.clear(); rows.update({i['id']: dict(i) for i in c['instances']}); refresh(); load_form(); status(L('列表已刷新。', 'List refreshed.'))
 
     bw, bx = 136, (18, 168)
     spec = [(L('+ 第三方', '+ 3P'), lambda: add(False), False), (L('+ 官方', '+ Official'), lambda: add(True), False),
@@ -351,7 +359,7 @@ def build(core):
             (L('同步会话', 'Sync sessions'), guarded(sync_now), False), (L('刷新列表', 'Refresh list'), guarded(list_refresh), False)]
     for k, (t, f, prim) in enumerate(spec):
         Btn(right, t, f, primary=prim, width=bw).place(x=bx[k % 2], y=124 + (k // 2) * 46)
-    api.update(add=add, commit=commit_form, select=lambda iid: (tv.selection_set(iid), load_form()), rows=rows, check=check_sel, init=init_sel, save=save_all, pump=pump, queue=q, txt=txt, tv=tv, busy=busy,
+    api.update(add=add, remove=guarded(remove),commit=commit_form, select=lambda iid: (tv.selection_set(iid), load_form()), rows=rows, check=check_sel, init=init_sel, save=save_all, pump=pump, queue=q, txt=txt, tv=tv, busy=busy,
                form=dict(name=v_name, kind=v_kind, pal=v_pal, proxy=v_proxy, tz=v_tz, prov=v_prov), emit=emit, status=status)
 
     # ---- behaviour card

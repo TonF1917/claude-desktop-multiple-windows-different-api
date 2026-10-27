@@ -189,6 +189,7 @@ function Initialize-InstanceEnv($i) {
 
 function Test-InstancePurity($i) {
   $proxy = if ($i.proxy) { $i.proxy } else { "http://127.0.0.1:7890" }
+  $proxyShown = $proxy -replace '(://)[^/\s]*@', '$1***@'       # report only the masked form (output may be truncated/logged)
   $tzExpected = $i.timezone
 
   $rawIp = $null
@@ -205,7 +206,7 @@ function Test-InstancePurity($i) {
     return [pscustomobject]@{
       Id            = $i.id
       Name          = $i.name
-      Proxy         = $proxy
+      Proxy         = $proxyShown
       ExitIP        = 'Connection Failed'
       Location      = 'Unknown'
       IPType        = 'Unknown'
@@ -235,7 +236,7 @@ function Test-InstancePurity($i) {
   [pscustomobject]@{
     Id            = $i.id
     Name          = $i.name
-    Proxy         = $proxy
+    Proxy         = $proxyShown
     ExitIP        = $rawIp
     Location      = $city
     IPType        = $isRes

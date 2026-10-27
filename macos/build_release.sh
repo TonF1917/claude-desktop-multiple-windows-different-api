@@ -16,7 +16,7 @@ VERSION="$(tr -d '[:space:]' < "$HERE/VERSION")"
 OUT="${1:-$REPO/dist}"
 NAME="ClaudeMulti-macOS-v$VERSION"
 
-for f in macos/claude_multi.py macos/claude_multi_gui.py palettes.json "macos/Claude Multi.command" README.md README.zh-CN.md LICENSE; do
+for f in macos/claude_multi.py macos/claude_multi_gui.py palettes.json macos/VERSION examples/profile.example.json "macos/Claude Multi.command" README.md README.zh-CN.md LICENSE; do
   [ -f "$REPO/$f" ] || { echo "error: missing $f" >&2; exit 1; }
 done
 
@@ -39,7 +39,8 @@ files = [('macos/claude_multi.py', 'macos/claude_multi.py', True), ('macos/claud
          ('examples/profile.example.json', 'examples/profile.example.json', False),
          ('macos/Claude Multi.command', 'Claude Multi.command', True),
          ('README.md', 'README.md', False), ('README.zh-CN.md', 'README.zh-CN.md', False), ('LICENSE', 'LICENSE', False)]
-target = out / f'{name}.zip'
+final = out / f'{name}.zip'
+target = out / f'{name}.zip.tmp'          # built next to the final name, moved into place only when complete
 if target.exists():
     target.unlink()
 now = time.localtime()[:6]
@@ -53,5 +54,7 @@ with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
         zi.create_system = 3                                # Unix, so the mode bits below are honoured by unzip / Archive Utility
         zi.external_attr = (0o100755 if exe else 0o100644) << 16
         z.writestr(zi, data)
-print(f'built {target} ({target.stat().st_size} bytes, {len(files)} files)')
+import os
+os.replace(target, final)
+print(f'built {final} ({final.stat().st_size} bytes, {len(files)} files)')
 EOF

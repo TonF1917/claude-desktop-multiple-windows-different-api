@@ -47,13 +47,13 @@ cd claude-desktop-multiple-windows-different-api
 | `launch -Id gem` | 启动某个窗口 |
 | `list`、`providers`、`sync`、`remove -Id gem`、`icons -Force`、`uninstall` | 日常维护 |
 
-## macOS(实验性,v1.1.0)
+## macOS(v1.2.0)
 
 macOS 版在 [`macos/`](macos) 目录(Python 3,仅用标准库),现已对齐 Windows 版功能:多官方窗口、每窗口独立的 `kind` / `proxy` / `timezone`、`init` / `check`,以及覆盖全部选项的图形界面。
 
 > **如实说明:** 它是**在没有 Mac 的条件下写成的**。配置读写、配色、代理/时区/启动参数的生成、凭据脱敏、出口检测(用模拟应答)、`init` 的文件准备和图形界面已在 Windows 上跑通;只能在 macOS 上执行的步骤——克隆 `Claude.app`(`cp -c`)、`sips` / `iconutil` 重绘图标、ad-hoc `codesign`、直接启动克隆体二进制、用 `ps` 识别进程——是按这些工具的文档行为编写的,**从未在真机上运行过**。可能有粗糙之处,欢迎带着终端输出反馈。
 
-**获取:** 下载 `ClaudeMulti-macOS-vX.Y.Z.zip`(由 `macos/build_release.sh` 生成),解压后双击 `Claude Multi.command`(首次请右键 -> 打开);或在克隆的仓库里:
+**获取:** 下载 `ClaudeMulti-macOS-v1.2.0.zip`(由 `macos/build_release.sh` 生成),解压后双击 `Claude Multi.command`(首次请右键 -> 打开);或在克隆的仓库里:
 
 ```bash
 python3 macos/claude_multi.py gui
@@ -75,7 +75,9 @@ python3 macos/claude_multi.py agent &             # 会话镜像 + 后台静默�
 
 **macOS 上启动时做了什么。** 直接执行窗口自己的二进制(主官方窗口用原版 `Claude.app`,其余窗口用各自的配色克隆体),环境变量才能真正传到进程里:
 
-* 由窗口的 `proxy` 注入 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`(含小写),并设 `NO_PROXY=localhost,127.0.0.1,::1`,保证本机 cc-switch 网关仍可直连。默认**不**加 `--proxy-server`(在窗口上设 `"proxyServerFlag": true` 才加)。macOS 上 Chromium 不一定遵守这些变量,请先用 `check` 和泄漏测试验证,再把账号交给它。
+* **严格代理路由**: 只要配置了 `proxy`，无条件向 Electron 追加 `--proxy-server`（凭据剥离安全格式），杜绝 macOS 下 Chromium 忽略环境变量导致的裸连泄漏。
+* **存储与 Keychain 隔离**: 注入 `--use-mock-keychain` 与 `--password-store=basic`，阻止多开克隆体并发抢占 macOS 系统钥匙串条目 "Claude Safe Storage"，避免频繁弹窗与 Cookie/Session 相互覆盖冲刷。
+* **WebRTC 强制防漏**: 注入 `--webrtc-ip-handling-policy=disable_non_proxied_udp` 与 `--force-webrtc-ip-handling-policy`，封堵 STUN UDP 旁路探测。
 * 仅对该进程设 `TZ=<时区>`,并按时区推导 `--lang=<语言区域>`(可用 `"lang"` 覆盖)。
 * `--webrtc-ip-handling-policy=disable_non_proxied_udp`;除主官方窗口外都带 `--user-data-dir=~/.claude-multi/<id>/Claude`。
 * 次级官方窗口(`--kind official` 且 id 不是 `official`)使用独立数据目录,每次启动前删除其中的 `configLibrary`,并且不会创建同级 `Claude-3p`,因此始终是纯 1P,不会读到 cc-switch 配置。

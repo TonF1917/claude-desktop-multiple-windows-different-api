@@ -89,6 +89,10 @@ function Show-Manager {
   function Set-Status($text) { $lblStatus.Text = ('{0}  -  {1}' -f (Get-Date -Format 'HH:mm:ss'), $text) }
   $cmbLang = New-Object Windows.Forms.ComboBox; $cmbLang.DropDownStyle = 'DropDownList'; $cmbLang.Location = New-Object Drawing.Point(1100, 22); $cmbLang.Size = New-Object Drawing.Size(112, 28); $cmbLang.Font = $fSmall; $cmbLang.FlatStyle = 'Flat'
   [void]$cmbLang.Items.Add('English'); [void]$cmbLang.Items.Add('中文'); $cmbLang.SelectedIndex = $(if ($zh) { 1 } else { 0 }); $cmbLang.TabStop = $false
+  $btnDoctor = New-Btn (L '诊断' 'Doctor') 820 18 96 $false {
+    Start-CliJob (L '环境诊断' 'Environment Doctor') 'doctor' ''
+  }
+
   $cmbLang.Add_SelectionChangeCommitted({
     $c = Read-Config; $c.settings.language = $(if ($cmbLang.SelectedIndex -eq 1) { 'zh' } else { 'en' }); Save-Config $c
     Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-STA', '-File', "`"$Root\claude-multi.ps1`"", 'gui'
@@ -288,10 +292,11 @@ function Show-Manager {
   $script:jobs = New-Object Collections.ArrayList
   function Start-CliJob([string]$label, [string]$command, [string]$id) {
     $out = [IO.Path]::GetTempFileName(); $err = $out + '.err'
-    $al = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$Root\claude-multi.ps1`"", $command, '-Id', $id)
+    $al = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$Root\claude-multi.ps1`"", $command)
+    if ($id) { $al += @('-Id', $id) }
     $p = Start-Process powershell.exe -ArgumentList $al -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
     [void]$script:jobs.Add(@{ proc = $p; out = $out; err = $err; label = $label; id = $id; off = 0 })
-    $txtOut.AppendText("`r`n> $command -Id $id`r`n"); Set-Status ("$label ...")
+    $txtOut.AppendText("`r`n> $command$(if ($id) { " -Id $id" })`r`n"); Set-Status ("$label ...")
   }
   function Read-Shared([string]$path) {
     try { $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite'); try { (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() } } catch { '' }
@@ -361,7 +366,7 @@ function Show-Manager {
   $txtOut = New-Object Windows.Forms.TextBox; $txtOut.Multiline = $true; $txtOut.ReadOnly = $true; $txtOut.ScrollBars = 'Vertical'; $txtOut.Location = New-Object Drawing.Point(14, 36); $txtOut.Size = New-Object Drawing.Size(1164, 78)
   $txtOut.BackColor = $IVORY; $txtOut.ForeColor = $SLATE; $txtOut.BorderStyle = 'None'; $txtOut.Font = New-Object Drawing.Font('Consolas', 9)
   foreach ($ctl in @($lblOut, $txtOut)) { $cardOut.Controls.Add($ctl) }
-  foreach ($ctl in @($burst, $lblTitle, $lblSub, $lblStatus, $lblLang, $cmbLang, $cardGrid, $cardSide, $cardSet, $cardOut)) { $form.Controls.Add($ctl) }
+  foreach ($ctl in @($burst, $lblTitle, $lblSub, $lblStatus, $btnDoctor, $lblLang, $cmbLang, $cardGrid, $cardSide, $cardSet, $cardOut)) { $form.Controls.Add($ctl) }
 
   # ---- live status
   $timer = New-Object Windows.Forms.Timer; $timer.Interval = 3000

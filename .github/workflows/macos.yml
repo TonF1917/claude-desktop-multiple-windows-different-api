@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  macos-test:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run unit tests
+        run: |
+          python -m unittest discover tests/
+
+      - name: Test Claude.app fixture, doctor, and release build
+        run: |
+          # 1. Create a dummy Claude.app fixture in /Applications
+          sudo mkdir -p /Applications/Claude.app/Contents/MacOS
+          sudo mkdir -p /Applications/Claude.app/Contents/Resources
+          sudo bash -c 'cat <<EOF > /Applications/Claude.app/Contents/Info.plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>Claude</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.anthropic.claudefortesting</string>
+    <key>CFBundleName</key>
+    <string>Claude</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.9.20</string>
+</dict>
+</plist>
+EOF'
+          sudo bash -c 'echo "#!/bin/sh" > /Applications/Claude.app/Contents/MacOS/Claude'
+          sudo chmod +x /Applications/Claude.app/Contents/MacOS/Claude
+
+          # 2. Run Doctor CLI with the fixture in place
+          python macos/claude_multi.py doctor
+
+          # 3. Test installer script
+          bash macos/install.sh
+
+          # 4. Test build_release.sh
+          bash macos/build_release.sh
+          test -f dist/ClaudeMulti-macOS-v$(cat macos/VERSION).zip
+
+  windows-syntax:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Recurse -Filter *.ps1
+          $hasErrors = $false
+          foreach ($f in $files) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors)
+            if ($errors) {
+              Write-Error "Syntax error in $($f.FullName): $errors"
+              $hasErrors = $true
+            } else {
+              Write-Host "Valid syntax: $($f.FullName)" -ForegroundColor Green
+            }
+          }
+          if ($hasErrors) { exit 1 }

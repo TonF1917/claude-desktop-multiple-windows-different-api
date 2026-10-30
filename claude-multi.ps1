@@ -6,7 +6,7 @@
 .EXAMPLE   .\claude-multi.ps1 launch -Id 3p
 #>
 param(
-  [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'init', 'setup', 'check', 'test-ip', 'purity', 'uninstall', 'icons', 'providers')][string]$Command = 'gui',
+  [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'init', 'setup', 'check', 'test-ip', 'purity', 'uninstall', 'icons', 'providers', 'doctor')][string]$Command = 'gui',
   [string]$Id, [string]$Name, [string]$Kind, [string]$Palette = 'violet', [string]$Provider, [string]$Profile, [string]$Url, [string]$Proxy, [string]$Timezone,
   [switch]$Force
 )
@@ -14,6 +14,10 @@ $Root = $PSScriptRoot
 . (Join-Path $Root 'src\Core.ps1')
 
 switch ($Command) {
+  'doctor' {
+    $res = Invoke-Doctor
+    if ($res.Fails -gt 0) { exit 1 }
+  }
   'gui'     {
     . (Join-Path $Root 'src\Gui.ps1')
     try { Show-Manager } catch {

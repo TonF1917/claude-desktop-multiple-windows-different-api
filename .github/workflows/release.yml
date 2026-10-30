@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'macos-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build release zip
+        run: |
+          chmod +x macos/build_release.sh
+          bash macos/build_release.sh
+          VERSION=$(cat macos/VERSION)
+          ZIP="dist/ClaudeMulti-macOS-v${VERSION}.zip"
+          shasum -a 256 "$ZIP" > "${ZIP}.sha256"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ClaudeMulti-macOS-*.zip
+            dist/ClaudeMulti-macOS-*.zip.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true

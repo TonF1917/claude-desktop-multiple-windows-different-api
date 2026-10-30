@@ -16,7 +16,7 @@ VERSION="$(tr -d '[:space:]' < "$HERE/VERSION")"
 OUT="${1:-$REPO/dist}"
 NAME="ClaudeMulti-macOS-v$VERSION"
 
-for f in macos/claude_multi.py macos/claude_multi_gui.py palettes.json macos/VERSION examples/profile.example.json "macos/Claude Multi.command" README.md README.zh-CN.md LICENSE; do
+for f in macos/claude_multi.py macos/claude_multi_gui.py palettes.json macos/VERSION examples/profile.example.json "macos/Claude Multi.command" macos/install.sh README.md README.zh-CN.md LICENSE; do
   [ -f "$REPO/$f" ] || { echo "error: missing $f" >&2; exit 1; }
 done
 
@@ -38,6 +38,7 @@ files = [('macos/claude_multi.py', 'macos/claude_multi.py', True), ('macos/claud
          ('macos/VERSION', 'macos/VERSION', False), ('palettes.json', 'palettes.json', False),
          ('examples/profile.example.json', 'examples/profile.example.json', False),
          ('macos/Claude Multi.command', 'Claude Multi.command', True),
+         ('macos/install.sh', 'install.sh', True),
          ('README.md', 'README.md', False), ('README.zh-CN.md', 'README.zh-CN.md', False), ('LICENSE', 'LICENSE', False)]
 final = out / f'{name}.zip'
 target = out / f'{name}.zip.tmp'          # built next to the final name, moved into place only when complete
@@ -47,7 +48,8 @@ now = time.localtime()[:6]
 with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
     for src, dst, exe in files:
         data = (repo / src).read_bytes()
-        if dst.endswith('.command'):
+        if dst.endswith('.command') or dst.endswith('.sh') or dst.endswith('.py'):
+            data = data.replace(b'\r\n', b'\n')            # a CRLF shebang line would not run
             data = data.replace(b'\r\n', b'\n')            # a CRLF shebang line would not run
         zi = zipfile.ZipInfo(f'{name}/{dst}', date_time=now)
         zi.compress_type = zipfile.ZIP_DEFLATED

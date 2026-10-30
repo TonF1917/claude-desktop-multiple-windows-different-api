@@ -192,6 +192,10 @@ function Test-InstancePurity($i) {
   $proxyShown = $proxy -replace '(://)[^/\s]*@', '$1***@'       # report only the masked form (output may be truncated/logged)
   $tzExpected = $i.timezone
 
+  $hasAuth = if ($i.proxy -and ($i.proxy -match '://[^/@\s]+@' -or $i.proxy -match '^[^/@\s]+@')) { $true } else { $false }
+  $authWarning = if ($hasAuth) { "Chromium --proxy-server does not accept embedded credentials. For authenticated upstream proxies, route through a local unauthenticated gateway (e.g. 127.0.0.1:port) like cc-switch, Clash, or v2ray." } else { $null }
+  if ($authWarning) { Write-Warning $authWarning }
+
   $rawIp = $null
   try {
     $rawIp = curl.exe -x $proxy -s "https://api.ipify.org" --connect-timeout 8
@@ -213,6 +217,7 @@ function Test-InstancePurity($i) {
       RiskScore     = 'N/A'
       ClaudeStatus  = 'Unreachable'
       TimezoneMatch = 'N/A'
+      Warning       = $authWarning
     }
   }
 
@@ -243,6 +248,7 @@ function Test-InstancePurity($i) {
     RiskScore     = $riskScore
     ClaudeStatus  = $isSupported
     TimezoneMatch = $tzMatched
+    Warning       = $authWarning
   }
 }
 
@@ -298,7 +304,8 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
         }
         $args_ = @("--user-data-dir=`"$data`"") + $args_
         if ($i.proxy) {
-          $args_ += "--proxy-server=`"$($i.proxy)`""
+          $cleanProxy = $i.proxy -replace '://[^/@\s]+@', '://' -replace '^[^/@\s]+@', ''
+          $args_ += "--proxy-server=`"$cleanProxy`""
         }
       }
     } else {
@@ -309,11 +316,13 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
       $args_ = @("--user-data-dir=`"$data`"") + $args_
     }
     # 2026-10-20: Chromium/Electron 的 WebRTC 默认走裸 UDP，完全绕过 --proxy-server。
-    # 有效开关是 webrtc-ip-handling-policy（Chrome 156 实证；--force-webrtc- 变体不存在）。
-    # 同时补 official 分支缺失的 --proxy-server：Chromium 在 Windows 不读 HTTP(S)_PROXY 环境变量。
+    # 强制 WebRTC UDP 策略以阻止真实 IP 泄漏。
+    # 同时补 official 分支缺失的 --proxy-server 并去除嵌入的凭据（Chromium 命令行不接受 user:pass）。
     if ($i.proxy -and -not (($args_ -join ' ') -match '--proxy-server')) {
-      $args_ += "--proxy-server=`"$($i.proxy)`""
+      $cleanProxy = $i.proxy -replace '://[^/@\s]+@', '://' -replace '^[^/@\s]+@', ''
+      $args_ += "--proxy-server=`"$cleanProxy`""
     }
+    $args_ += '--force-webrtc-ip-handling-policy'
     $args_ += '--webrtc-ip-handling-policy=disable_non_proxied_udp'
     if ($Minimized) { [void][ShellProp]::StartMinNoActivate($exe, ($args_ -join ' ')) }
     elseif ($args_.Count) { Start-Process $exe -ArgumentList $args_ } else { Start-Process $exe }
@@ -616,6 +625,119 @@ function Invoke-LiveRefresh($cfg, $mains, [uint32]$fgPid, $focusFix) {
     return                                                                            # one restart per cycle
   }
 }
+
+function Invoke-Doctor {
+  [CmdletBinding()]
+  param()
+
+  Write-Host "=== Claude Multi Doctor (Windows) ===" -ForegroundColor Cyan
+  $passes = 0
+  $warns  = 0
+  $fails  = 0
+
+  # 1. PowerShell version
+  $psVer = $PSVersionTable.PSVersion
+  if ($psVer.Major -ge 5) {
+    Write-Host "[PASS] PowerShell Version: $psVer (>= 5.1)" -ForegroundColor Green
+    $passes++
+  } else {
+    Write-Host "[FAIL] PowerShell Version: $psVer (< 5.1 required)" -ForegroundColor Red
+    Write-Host "       Remediation: Upgrade to Windows PowerShell 5.1 or PowerShell 7." -ForegroundColor Yellow
+    $fails++
+  }
+
+  # 2. Claude Desktop installation
+  $claudeExe = Join-Path $env:LOCALAPPDATA 'Programs\Claude\Claude.exe'
+  $aliasExe  = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\claude-desktop-msstore.exe'
+  $hasPkg    = $false
+  try {
+    if (Get-Command Get-ClaudePackage -ErrorAction SilentlyContinue) {
+      $pkg = Get-ClaudePackage
+      if ($pkg) { $hasPkg = $true }
+    }
+  } catch { }
+
+  if (Test-Path $claudeExe) {
+    $verInfo = (Get-Item $claudeExe).VersionInfo.ProductVersion
+    Write-Host "[PASS] Claude Desktop: Found at $claudeExe (version $verInfo)" -ForegroundColor Green
+    $passes++
+  } elseif (Test-Path $aliasExe) {
+    Write-Host "[PASS] Claude Desktop: Found Microsoft Store execution alias at $aliasExe" -ForegroundColor Green
+    $passes++
+  } elseif ($hasPkg) {
+    Write-Host "[PASS] Claude Desktop: Found MSStore package AnthropicPBC.ClaudeDesktop" -ForegroundColor Green
+    $passes++
+  } else {
+    Write-Host "[FAIL] Claude Desktop: Not found at $claudeExe" -ForegroundColor Red
+    Write-Host "       Remediation: Install Claude Desktop from https://claude.ai/download" -ForegroundColor Yellow
+    $fails++
+  }
+
+  # 3. cc-switch directory / config
+  $ccSwitchDir = Join-Path $env:APPDATA 'cc-switch'
+  if (Test-Path $ccSwitchDir) {
+    Write-Host "[PASS] cc-switch: Found configuration directory at $ccSwitchDir" -ForegroundColor Green
+    $passes++
+  } else {
+    Write-Host "[PASS] cc-switch: Not detected (optional, required only for cc-switch profile sync)" -ForegroundColor Gray
+    $passes++
+  }
+
+  # 4. instances.json format and integrity
+  $cfgPath = $script:ConfigPath
+  $cfgObj  = $null
+  if (Test-Path $cfgPath) {
+    try {
+      $raw = Get-Content $cfgPath -Raw -Encoding UTF8
+      $cfgObj = $raw | ConvertFrom-Json
+      if ($cfgObj.instances) {
+        Write-Host "[PASS] Config: instances.json valid with $($cfgObj.instances.Count) instance(s)" -ForegroundColor Green
+        $passes++
+      } else {
+        Write-Host "[FAIL] Config: instances.json missing 'instances' array" -ForegroundColor Red
+        Write-Host "       Remediation: Check JSON format in $cfgPath" -ForegroundColor Yellow
+        $fails++
+      }
+    } catch {
+      Write-Host "[FAIL] Config: Corrupted instances.json: $_" -ForegroundColor Red
+      Write-Host "       Remediation: Fix JSON syntax in $cfgPath" -ForegroundColor Yellow
+      $fails++
+    }
+  } else {
+    Write-Host "[WARN] Config: instances.json not found at $cfgPath" -ForegroundColor Yellow
+    Write-Host "       Remediation: Run 'claude-multi init' or launch GUI to create default configuration." -ForegroundColor Yellow
+    $warns++
+  }
+
+  # 5. Proxy syntax and embedded credentials check
+  $badProxies = @()
+  if ($cfgObj -and $cfgObj.instances) {
+    foreach ($inst in $cfgObj.instances) {
+      if ($inst.proxy -and ($inst.proxy -match '://[^/@\s]+@' -or $inst.proxy -match '^[^/@\s]+@')) {
+        $badProxies += $inst.name
+      }
+    }
+  }
+  if ($badProxies.Count -gt 0) {
+    Write-Host "[WARN] Proxy Syntax: Instances with embedded credentials: $($badProxies -join ', ')" -ForegroundColor Yellow
+    Write-Host "       Remediation: Chromium --proxy-server does not accept embedded credentials. For authenticated upstream proxies, route through a local unauthenticated gateway (e.g. 127.0.0.1:port) like cc-switch, Clash, or v2ray." -ForegroundColor Yellow
+    $warns++
+  } else {
+    Write-Host "[PASS] Proxy Syntax: No unsupported embedded credentials found" -ForegroundColor Green
+    $passes++
+  }
+
+  Write-Host ""
+  $sumColor = if ($fails -gt 0) { "Red" } elseif ($warns -gt 0) { "Yellow" } else { "Green" }
+  Write-Host "Summary: $passes PASS, $warns WARN, $fails FAIL" -ForegroundColor $sumColor
+
+  return [pscustomobject]@{
+    Passes = $passes
+    Warns  = $warns
+    Fails  = $fails
+  }
+}
+
 
 # ---------------------------------------------------------------- background agent
 function Invoke-Agent {

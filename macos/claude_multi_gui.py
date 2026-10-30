@@ -99,6 +99,17 @@ def build(core):
             tv.selection_set(keep)
         elif tv.get_children():
             tv.selection_set(tv.get_children()[0])
+        # Check if official Claude.app updated and clones need rebuild
+        outdated_ids = []
+        for iid, i in rows.items():
+            if not core.is_primary(i):
+                outdated, src_v, clone_v = core.check_clone_update(i)
+                if outdated:
+                    outdated_ids.append((iid, src_v, clone_v))
+        if outdated_ids:
+            names = ', '.join([f"{iid} ({c_v}->{s_v})" for iid, s_v, c_v in outdated_ids])
+            status(L(f'提示: Claude.app 已更新, 实例需要重建: {names}',
+                     f'Notice: Claude.app updated, rebuild needed for: {names}'), True)
 
     # ---- details form (edits the selected row)
     det = card(root); det.place(x=24, y=382, width=850, height=150)
@@ -345,7 +356,44 @@ def build(core):
 
     def sync_now():
         save_all()
-        bg(L('同步会话', 'Sync sessions'), lambda out: out(L('已同步 ', 'Synced ') + str(core.sync_sessions(core.read_config(), {})) + L(' 个文件', ' file(s)')))
+        def work(out):
+            sess_copied = core.sync_sessions(core.read_config(), {})
+            mcp_updated = core.sync_mcp_servers()
+            out(L(f'已同步会话: {sess_copied} 个文件, MCP 配置: {mcp_updated} 个实例',
+                  f'Synced sessions: {sess_copied} file(s), MCP configs: {mcp_updated} instance(s)'))
+        bg(L('同步会话', 'Sync sessions'), work)
+
+    def doctor_now():
+        def work(out):
+            out("=== " + L('运行环境诊断', 'Running Environment Doctor') + " ===")
+            results = core.run_doctor()
+            passes = sum(1 for r in results if r['status'] == 'PASS')
+            warns = sum(1 for r in results if r['status'] == 'WARN')
+            fails = sum(1 for r in results if r['status'] == 'FAIL')
+            for r in results:
+                badge = f"[{r['status']}]"
+                out(f"{badge:<7} {r['name']}: {r['message']}")
+                if r.get('remediation'):
+                    out("        " + L('修复: ', 'Fix: ') + r['remediation'])
+            out('')
+            out(f"Summary: {passes} PASS, {warns} WARN, {fails} FAIL")
+            if fails == 0 and warns == 0:
+                out(L('所有检查通过！环境就绪。', 'All checks passed! Environment is healthy.'))
+            elif fails == 0:
+                out(L('存在警告，请查看上方提示。', 'Warnings found. Review recommendations above.'))
+            else:
+                out(L('存在未满足的硬性条件，请先修复。', 'Failures found. Please remediate before running.'))
+        bg(L('诊断', 'Doctor'), work)
+
+    def open_folder():
+        core.HOME_ROOT.mkdir(parents=True, exist_ok=True)
+        if core.IS_MAC:
+            subprocess.run(['open', str(core.HOME_ROOT)])
+        else:
+            try:
+                os.startfile(str(core.HOME_ROOT))
+            except Exception:
+                pass
 
     def list_refresh():
         c = core.read_config(); deleted.clear(); rows.clear(); rows.update({i['id']: dict(i) for i in c['instances']}); refresh(); load_form(); status(L('列表已刷新。', 'List refreshed.'))
@@ -356,9 +404,10 @@ def build(core):
             (L('初始化', 'Init'), guarded(init_sel), False), (L('检测 IP', 'Check'), guarded(check_sel), False),
             (L('启动所选', 'Launch'), guarded(launch_sel), True), (L('停止', 'Stop'), guarded(stop_sel), False),
             (L('重启', 'Restart'), guarded(restart_sel), False), (L('全部启动', 'Launch all'), guarded(launch_all), False),
-            (L('同步会话', 'Sync sessions'), guarded(sync_now), False), (L('刷新列表', 'Refresh list'), guarded(list_refresh), False)]
+            (L('同步会话', 'Sync sessions'), guarded(sync_now), False), (L('环境诊断', 'Doctor'), guarded(doctor_now), False),
+            (L('打开目录', 'Open folder'), open_folder, False), (L('刷新列表', 'Refresh list'), guarded(list_refresh), False)]
     for k, (t, f, prim) in enumerate(spec):
-        Btn(right, t, f, primary=prim, width=bw).place(x=bx[k % 2], y=124 + (k // 2) * 46)
+        Btn(right, t, f, primary=prim, width=bw, height=32).place(x=bx[k % 2], y=118 + (k // 2) * 44)
     api.update(add=add, remove=guarded(remove),commit=commit_form, select=lambda iid: (tv.selection_set(iid), load_form()), rows=rows, check=check_sel, init=init_sel, save=save_all, pump=pump, queue=q, txt=txt, tv=tv, busy=busy,
                form=dict(name=v_name, kind=v_kind, pal=v_pal, proxy=v_proxy, tz=v_tz, prov=v_prov), emit=emit, status=status)
 
@@ -374,6 +423,27 @@ def build(core):
 
     refresh(); load_form()
     root.after(100, pump); root.after(500, poll_status)
+
+    if not rows:
+        def show_onboard():
+            msg = L(
+                "欢迎使用 Claude 多开管理器！\n\n"
+                "检测到尚未配置多开实例。\n"
+                "• 点击 '+ 官方' 或 '+ 第三方' 即可创建独立窗口\n"
+                "• 每个窗口拥有独立 Cookie、代理、会话与数据目录\n"
+                "• 点击 '环境诊断' 可检查当前环境与依赖\n\n"
+                "是否立即运行一次环境诊断？",
+                "Welcome to Claude Multi Manager!\n\n"
+                "No instances configured yet.\n"
+                "• Click '+ Official' or '+ 3P' to create isolated windows\n"
+                "• Each instance has its own cookies, proxy, session & data dir\n"
+                "• Click 'Doctor' to verify your environment & dependencies\n\n"
+                "Run environment doctor now?"
+            )
+            if messagebox.askyesno(L('首次运行向导', 'First Run Onboarding'), msg):
+                doctor_now()
+        root.after(400, show_onboard)
+
     status(L('就绪。', 'Ready.') + ('' if core.IS_MAC else L(' (非 macOS:只能编辑配置、初始化目录和检测 IP)', ' (not macOS: config editing, directory init and IP check only)')))
     return root, api
 

@@ -49,13 +49,13 @@ Then right-click each new Desktop shortcut and choose **Pin to taskbar** (Window
 
 The manager GUI exposes the same options: a kind selector next to *Add*, click-to-edit **Proxy** (credentials are masked in the grid and the output pane) and **Timezone** (common IANA zones or typed), **Init** / **Check** buttons that run in a background process and stream into an output pane, plus *Stop*.
 
-## macOS - experimental (v1.1.0)
+## macOS (v1.2.0)
 
 The port lives in [`macos/`](macos) (Python 3, standard library only) and now mirrors the Windows feature set: multiple official windows, per-window `kind` / `proxy` / `timezone`, `init` / `check`, and a GUI with every option.
 
 > **Honest status:** it was written **without access to a Mac**. Config handling, palettes, proxy / timezone / launch-argument planning, secret masking, the egress check (against stubbed answers), `init` file provisioning and the GUI are exercised on Windows. The macOS-only steps - cloning `Claude.app` (`cp -c`), `sips` / `iconutil` icon tinting, ad-hoc `codesign`, starting the cloned binary and process matching through `ps` - follow the documented tool behaviour but have **never been run on real hardware**. Expect rough edges and please send the terminal output.
 
-**Get it:** download `ClaudeMulti-macOS-vX.Y.Z.zip` (built by `macos/build_release.sh`), unzip, double-click `Claude Multi.command` (first time: right-click -> Open), or from a clone:
+**Get it:** download `ClaudeMulti-macOS-v1.2.0.zip` (built by `macos/build_release.sh`), unzip, double-click `Claude Multi.command` (first time: right-click -> Open), or from a clone:
 
 ```bash
 python3 macos/claude_multi.py gui
@@ -77,7 +77,9 @@ python3 macos/claude_multi.py agent &             # session mirroring + silent b
 
 **What a launch does on macOS.** The window's own binary is executed directly (the primary official window runs the stock `Claude.app`; every other window runs its tinted clone), so the environment really reaches the process:
 
-* `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (+ lower-case) from the window's `proxy`, with `NO_PROXY=localhost,127.0.0.1,::1` so the local cc-switch gateway stays reachable. `--proxy-server` is **not** added by default (set `"proxyServerFlag": true` on a window to add it). Chromium on macOS does not necessarily honour these variables for page traffic - verify with `check` / a leak test before trusting an account to it.
+* **Strict Proxy Enforcement**: `--proxy-server` is unconditionally passed to Electron with credentials stripped, guaranteeing Chromium routes all traffic through the proxy and preventing direct gateway bypass.
+* **Storage & Keychain Isolation**: `--use-mock-keychain` and `--password-store=basic` prevent multi-instances from colliding on macOS Keychain \"Claude Safe Storage\", avoiding ad-hoc signature prompts and cookie wipeouts.
+* **WebRTC Leak Prevention**: `--webrtc-ip-handling-policy=disable_non_proxied_udp` and `--force-webrtc-ip-handling-policy` strictly block direct UDP STUN bypass.
 * `TZ=<timezone>` for that process only, plus `--lang=<locale>` derived from the timezone (override with `"lang"`).
 * `--webrtc-ip-handling-policy=disable_non_proxied_udp`; `--user-data-dir=~/.claude-multi/<id>/Claude` for every window except the primary official one.
 * Secondary official windows (`--kind official`, id other than `official`) get an isolated data dir, any `configLibrary` is deleted before every start, and the sibling `Claude-3p` is never created, so they stay pure 1P and never pick up a cc-switch profile.

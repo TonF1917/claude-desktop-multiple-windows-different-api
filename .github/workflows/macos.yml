@@ -27,24 +27,7 @@ jobs:
           # 1. Create a dummy Claude.app fixture in /Applications
           sudo mkdir -p /Applications/Claude.app/Contents/MacOS
           sudo mkdir -p /Applications/Claude.app/Contents/Resources
-          sudo bash -c 'cat <<EOF > /Applications/Claude.app/Contents/Info.plist
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>Claude</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.anthropic.claudefortesting</string>
-    <key>CFBundleName</key>
-    <string>Claude</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.9.20</string>
-</dict>
-</plist>
-EOF'
+          sudo python3 -c 'from pathlib import Path; Path("/Applications/Claude.app/Contents/Info.plist").write_text("<plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>Claude</string><key>CFBundleIdentifier</key><string>com.anthropic.claudefortesting</string><key>CFBundleName</key><string>Claude</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>0.9.20</string></dict></plist>")'
           sudo bash -c 'echo "#!/bin/sh" > /Applications/Claude.app/Contents/MacOS/Claude'
           sudo chmod +x /Applications/Claude.app/Contents/MacOS/Claude
 

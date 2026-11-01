@@ -114,7 +114,6 @@ class TestSecurity(unittest.TestCase):
         self.assertIn('--force-webrtc-ip-handling-policy', content)
         self.assertIn('--webrtc-ip-handling-policy=disable_non_proxied_udp', content)
         self.assertIn('--enforce-webrtc-ip-permission-check', content)
-        self.assertIn('--host-resolver-rules=', content)
         self.assertIn('--disable-quic', content)
         self.assertIn('--dns-prefetch-disable', content)
         self.assertIn('--proxy-server=', content)

@@ -764,7 +764,18 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
         $cleanProxy = $i.proxy -replace '://[^/@\s]+@', '://' -replace '^[^/@\s]+@', ''
         $args_ += "--proxy-server=`"$cleanProxy`""
       }
-      $args_ += '--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost , EXCLUDE ::1"'
+      # 2026-11-01: Claude Desktop 4.4212.0.0 起在主进程启动时扫描 process.argv，
+      # 命中黑名单即以 "Claude: refusing to start - a debugging or network-override
+      # switch is present on the command line." exit(1)。黑名单（app.asar 内 NY 常量，
+      # 前缀匹配 startsWith）：
+      #   remote-debugging-port / remote-debugging-pipe / ignore-certificate-errors /
+      #   host-resolver-rules / host-rules / disable-web-security / log-net-log /
+      #   net-log-capture-mode / ssl-key-log-file / renderer-cmd-prefix /
+      #   utility-cmd-prefix / gpu-launcher / zygote-cmd-prefix /
+      #   ppapi-plugin-launcher / nacl-loader-cmd-prefix / browser-subprocess-path
+      # --proxy-server 不在名单内（官方支持自定义代理），故仅移除
+      # --host-resolver-rules。隔离强度不降级：Chromium 在 HTTP 代理模式下由代理侧
+      # 解析域名、不发本地 DNS 查询；QUIC 与 WebRTC 仍由下方开关封堵。
       $args_ += '--disable-quic'
       $args_ += '--dns-prefetch-disable'
     }

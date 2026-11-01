@@ -13,7 +13,7 @@ Needs only Python 3 (standard library only).
     python3 macos/claude_multi.py check [--id off2]   # egress IP / residential-or-datacenter / risk / timezone alignment
     python3 macos/claude_multi.py launch --id gem     # also: stop, restart, list, remove, uninstall, agent, sync, providers
 """
-import argparse, binascii, colorsys, json, os, plistlib, re, shutil, signal, sqlite3, stat, struct, subprocess, sys, time, traceback, zlib
+import argparse, binascii, colorsys, hashlib, json, os, plistlib, re, shutil, signal, sqlite3, stat, struct, subprocess, sys, time, traceback, zlib
 import urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
@@ -655,6 +655,220 @@ def clone_binary(app):
         raise ClaudeMultiError(f'executable missing: {exe}')
     return exe
 
+CHAT_FONT_STYLE_ID = "claude-multi-chat-font"
+CHAT_FONT_SYNC_SCRIPT_ID = "claude-multi-chat-font-sync"
+_ASAR_STREAM_CHUNK = 4 * 1024 * 1024
+_ASAR_MAX_HEADER_BYTES = 64 * 1024 * 1024
+_ASAR_MAX_INDEX_HTML_BYTES = 16 * 1024 * 1024
+
+
+def _normalize_chat_font_slug(chat_font: str) -> str:
+    if not chat_font:
+        return ""
+    raw = str(chat_font).strip().lower()
+    return "".join(ch for ch in raw if ("a" <= ch <= "z") or ("0" <= ch <= "9") or ch in ("_", "-"))
+
+
+def get_chat_font_injection_markup(chat_font: str) -> str:
+    slug = _normalize_chat_font_slug(chat_font)
+    if slug not in ("anthropic-serif", "serif"):
+        return ""
+    return (
+        f'<style id="{CHAT_FONT_STYLE_ID}">\n'
+        ':root, html, body, .cds-root, [data-theme], [data-font], [class*="--font-claude-response"] {\n'
+        '  --font-cjk-serif-lead-sc: "Noto Serif SC", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STSong" !important;\n'
+        '  --font-claude-response: var(--font-anthropic-serif, "anthropic-serif", "Anthropic Serif", Georgia, "Times New Roman", serif) !important;\n'
+        '  --font-user-message: var(--font-anthropic-serif, "anthropic-serif", "Anthropic Serif", Georgia, "Times New Roman", serif) !important;\n'
+        '  --cds-font-voice: var(--font-anthropic-serif, "anthropic-serif", "Anthropic Serif", Georgia, serif) !important;\n'
+        '}\n'
+        '.prose, .prose[data-prose-font], .prose[data-prose-font="sans"] {\n'
+        '  --_prose-font-body: var(--_prose-face-serif, var(--font-anthropic-serif)) !important;\n'
+        '  --_prose-font-heading: var(--_prose-face-serif, var(--font-anthropic-serif)) !important;\n'
+        '  --_prose-font-heading-display: var(--_prose-face-serif, var(--font-anthropic-serif)) !important;\n'
+        '  --_prose-heading-weight: var(--cds-prose-weight-heading-serif, 520) !important;\n'
+        '}\n'
+        '.font-claude-response, .font-claude-response-body, .font-user-message, [data-testid="user-message"] {\n'
+        '  font-family: var(--font-anthropic-serif, "anthropic-serif", "Anthropic Serif", Georgia, "Noto Serif SC", serif) !important;\n'
+        '}\n'
+        '.prose pre, .prose code, .font-claude-response pre, .font-claude-response code, .font-user-message pre, .font-user-message code {\n'
+        '  font-family: var(--_prose-face-mono, var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)) !important;\n'
+        '}\n'
+        f'</style><script id="{CHAT_FONT_SYNC_SCRIPT_ID}">'
+        'try{localStorage.setItem("LSS-customStyles:chatFont",JSON.stringify({value:"serif"}));'
+        'localStorage.setItem("LSS-customStyles:chatFontSynced",JSON.stringify({value:true}));}catch(_){}'
+        '</script>'
+    )
+
+
+def _strip_element_by_open_tag(html: str, open_tag: str, close_tag: str) -> str:
+    open_low = open_tag.lower()
+    close_low = close_tag.lower()
+    out = []
+    pos = 0
+    low = html.lower()
+    while True:
+        start = low.find(open_low, pos)
+        if start < 0:
+            out.append(html[pos:])
+            break
+        end = low.find(close_low, start + len(open_low))
+        if end < 0:
+            out.append(html[pos:])
+            break
+        out.append(html[pos:start])
+        pos = end + len(close_low)
+    return "".join(out)
+
+
+def _read_exact(stream, size: int) -> bytes:
+    chunks = []
+    remaining = size
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            raise ValueError(f"Unexpected EOF while reading {size} bytes from ASAR")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def patch_asar_index_html_font(source_asar: Path, dest_asar: Path, chat_font: str) -> Path:
+    src = Path(source_asar)
+    dst = Path(dest_asar)
+    markup = get_chat_font_injection_markup(chat_font)
+    if not markup:
+        raise ValueError(f"Unsupported chatFont: {chat_font!r}")
+
+    if src.is_symlink():
+        raise ValueError(f"Refusing to operate on symlinked source ASAR: {src}")
+    if src.parent.is_symlink():
+        raise ValueError(f"Refusing to operate inside symlinked source parent: {src.parent}")
+    if not src.is_file():
+        raise FileNotFoundError(f"Source ASAR not found: {src}")
+
+    if dst.is_symlink():
+        raise ValueError(f"Refusing to overwrite symlinked destination ASAR: {dst}")
+    if dst.parent.is_symlink():
+        raise ValueError(f"Refusing to write inside symlinked destination parent: {dst.parent}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.parent.is_symlink():
+        raise ValueError(f"Refusing to write inside symlinked destination parent: {dst.parent}")
+
+    tmp_path = dst.parent / f"{dst.name}.tmp.{os.getpid()}"
+    if tmp_path.is_symlink():
+        raise ValueError(f"Refusing to use symlinked temporary path: {tmp_path}")
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    try:
+        with src.open("rb") as in_f:
+            file_len = os.fstat(in_f.fileno()).st_size
+            if file_len < 16:
+                raise ValueError(f"Invalid ASAR archive (too small: {file_len} bytes): {src}")
+            u0, u1, u2, jlen = struct.unpack("<IIII", _read_exact(in_f, 16))
+            if u0 != 4 or jlen <= 0 or jlen > _ASAR_MAX_HEADER_BYTES:
+                raise ValueError(f"Invalid ASAR pickle header (u0={u0}, jlen={jlen})")
+            data_start = 8 + u1
+            if data_start < 16 + jlen or data_start > file_len:
+                raise ValueError(f"Invalid ASAR data boundary (data_start={data_start}, file_len={file_len})")
+            orig_payload_len = file_len - data_start
+
+            header_obj = json.loads(_read_exact(in_f, jlen).decode("utf-8"))
+            if not isinstance(header_obj, dict) or not isinstance(header_obj.get("files"), dict):
+                raise ValueError("Invalid ASAR JSON header: missing root 'files' dictionary")
+            files_map = header_obj["files"]
+            if "index.html" not in files_map or not isinstance(files_map["index.html"], dict):
+                raise ValueError("ASAR archive does not contain a root 'index.html' file entry")
+            idx_entry = files_map["index.html"]
+            if "offset" not in idx_entry or "size" not in idx_entry:
+                raise ValueError("ASAR 'index.html' entry is unpacked or missing offset/size")
+
+            orig_offset = int(idx_entry["offset"])
+            orig_size = int(idx_entry["size"])
+            if (
+                orig_offset < 0
+                or orig_size < 0
+                or orig_size > _ASAR_MAX_INDEX_HTML_BYTES
+                or orig_offset + orig_size > orig_payload_len
+            ):
+                raise ValueError(f"Invalid ASAR 'index.html' bounds (offset={orig_offset}, size={orig_size})")
+
+            in_f.seek(data_start + orig_offset)
+            orig_html = _read_exact(in_f, orig_size).decode("utf-8")
+
+            clean_html = _strip_element_by_open_tag(
+                orig_html, f'<style id="{CHAT_FONT_STYLE_ID}">', "</style>"
+            )
+            clean_html = _strip_element_by_open_tag(
+                clean_html, f'<script id="{CHAT_FONT_SYNC_SCRIPT_ID}">', "</script>"
+            )
+            head_idx = clean_html.lower().find("</head>")
+            if head_idx >= 0:
+                new_html = clean_html[:head_idx] + markup + clean_html[head_idx:]
+            else:
+                new_html = clean_html + markup
+
+            new_html_bytes = new_html.encode("utf-8")
+            full_hash = hashlib.sha256(new_html_bytes).hexdigest()
+            block_hashes = [
+                hashlib.sha256(new_html_bytes[pos : pos + _ASAR_STREAM_CHUNK]).hexdigest()
+                for pos in range(0, len(new_html_bytes), _ASAR_STREAM_CHUNK)
+            ]
+
+            base_payload_len = (
+                orig_offset if (orig_offset + orig_size == orig_payload_len) else orig_payload_len
+            )
+            idx_entry["size"] = len(new_html_bytes)
+            idx_entry["offset"] = str(base_payload_len)
+            idx_entry["integrity"] = {
+                "algorithm": "SHA256",
+                "hash": full_hash,
+                "blockSize": _ASAR_STREAM_CHUNK,
+                "blocks": block_hashes,
+            }
+
+            new_json_bytes = json.dumps(header_obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            new_jlen = len(new_json_bytes)
+            aligned_jlen = (new_jlen + 3) & ~3
+            pad_len = aligned_jlen - new_jlen
+            new_u1 = aligned_jlen + 8
+            new_u2 = aligned_jlen + 4
+            new_hdr = struct.pack("<IIII", 4, new_u1, new_u2, new_jlen)
+
+            open_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            if hasattr(os, "O_BINARY"):
+                open_flags |= os.O_BINARY
+            fd = os.open(str(tmp_path), open_flags, 0o644)
+            with os.fdopen(fd, "wb") as out_f:
+                out_f.write(new_hdr)
+                out_f.write(new_json_bytes)
+                if pad_len:
+                    out_f.write(b"\x00" * pad_len)
+                in_f.seek(data_start)
+                remaining = base_payload_len
+                while remaining > 0:
+                    chunk = in_f.read(min(_ASAR_STREAM_CHUNK, remaining))
+                    if not chunk:
+                        raise ValueError("Unexpected EOF while streaming ASAR payload")
+                    out_f.write(chunk)
+                    remaining -= len(chunk)
+                out_f.write(new_html_bytes)
+                out_f.flush()
+                os.fsync(out_f.fileno())
+
+        if dst.is_symlink():
+            raise ValueError(f"Refusing to overwrite symlinked destination ASAR: {dst}")
+        os.replace(tmp_path, dst)
+        return dst
+    except Exception:
+        try:
+            if tmp_path.exists() and not tmp_path.is_symlink():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def ensure_clone(i, force=False, out=print):
     """APFS-clone Claude.app (no extra disk space), tint its icon, rename it, drop its claude:// handler, ad-hoc sign. Idempotent."""
     if is_primary(i):
@@ -662,7 +876,9 @@ def ensure_clone(i, force=False, out=print):
     if not IS_MAC:
         raise ClaudeMultiError('cloning Claude.app needs macOS')
     src = official_app(); dst = clone_path(i); stamp = dst / 'Contents' / '.multi-version'
-    want = f"{app_version(src)}|{i.get('palette')}|{i['name']}|2"
+    chat_font_slug = _normalize_chat_font_slug(i.get('chatFont', ''))
+    has_chat_font = bool(get_chat_font_injection_markup(chat_font_slug))
+    want = f"{app_version(src)}|{i.get('palette')}|{i['name']}|2" + (f"|{chat_font_slug}" if has_chat_font else "")
     if dst.exists() and not force and stamp.exists() and stamp.read_text() == want:
         return dst
     CLONES.mkdir(parents=True, exist_ok=True)
@@ -689,6 +905,10 @@ def ensure_clone(i, force=False, out=print):
         info['CFBundleIdentifier'] = f"{info.get('CFBundleIdentifier', 'com.anthropic.claudefordesktop').split('.multi.')[0]}.multi.{i['id']}"
         info.pop('CFBundleURLTypes', None)
         plist_path.write_bytes(plistlib.dumps(info))
+        if has_chat_font:
+            ion_asar = tmp_app / 'Contents' / 'Resources' / 'ion-dist.asar'
+            if ion_asar.exists() or ion_asar.is_symlink():
+                patch_asar_index_html_font(ion_asar, ion_asar, chat_font_slug)
         sh('xattr', '-cr', str(tmp_app), check=False)
         old = CLONES / f'.old-{i["id"]}.app'
         shutil.rmtree(old, ignore_errors=True)
@@ -778,7 +998,7 @@ def running(i):
 def build_env(i, base=None, shield_path=None, startup_ip=None):
     """Child environment: process-level TZ and proxy variables for this window only (other windows / the shell are untouched)."""
     env = dict(os.environ if base is None else base)
-    for k in PROXY_VARS + ('TZ', 'CLAUDE_MULTI_PROXY_URL', 'CLAUDE_MULTI_STARTUP_IP', 'CLAUDE_MULTI_EXIT_POLICY', 'CLAUDE_MULTI_MONITOR_INTERVAL_MS', 'CLAUDE_MULTI_USER_DATA_DIR'):
+    for k in PROXY_VARS + ('TZ', 'CLAUDE_MULTI_PROXY_URL', 'CLAUDE_MULTI_STARTUP_IP', 'CLAUDE_MULTI_EXIT_POLICY', 'CLAUDE_MULTI_MONITOR_INTERVAL_MS', 'CLAUDE_MULTI_USER_DATA_DIR', 'CLAUDE_MULTI_CHAT_FONT'):
         env.pop(k, None)
     if i.get('proxy'):
         for k in PROXY_VARS:
@@ -801,6 +1021,10 @@ def build_env(i, base=None, shield_path=None, startup_ip=None):
             env['NODE_OPTIONS'] = f'{existing_node_opts} {req_flag}'.strip()
     if i.get('timezone') and i.get('timezone') != 'auto':
         env['TZ'] = i['timezone']
+    if i.get('chatFont'):
+        chat_font_val = str(i['chatFont']).strip().lower()
+        if chat_font_val:
+            env['CLAUDE_MULTI_CHAT_FONT'] = chat_font_val
     return env
 
 def build_args(i, url=None):

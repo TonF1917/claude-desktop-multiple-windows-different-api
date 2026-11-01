@@ -13,7 +13,8 @@
                           "id":  "3p",
                           "name":  "Claude 3P",
                           "kind":  "cc-switch",
-                          "palette":  "violet"
+                          "palette":  "violet",
+                          "chatFont":  "anthropic-serif"
                       },
                       {
                           "id":  "official2",

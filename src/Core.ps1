@@ -1,6 +1,7 @@
 ﻿# Shared logic for claude-multi (dot-sourced by claude-multi.ps1). Requires $Root to be set.
 $ErrorActionPreference = 'Stop'
 $script:RealLocal     = $env:LOCALAPPDATA                        # captured before any per-instance override
+if (-not $Root) { $script:Root = Split-Path -Parent $PSScriptRoot }
 $script:ConfigPath    = Join-Path $Root 'instances.json'
 $script:HomeRoot      = Join-Path $env:USERPROFILE '.claude-multi'   # state, icons and one private fake %LOCALAPPDATA% per extra instance
 $script:StateDir      = $HomeRoot                                  # NB: not under AppData\*\ClaudeMulti - Explorer cannot load icons from there
@@ -662,15 +663,424 @@ function Test-InstancePurity($i) {
   }
 }
 
+# ---------------------------------------------------------------- chat font (.asar index.html patch & cached runtime)
+function Get-ChatFontInjectionMarkup([string]$ChatFont) {
+  if ([string]::IsNullOrWhiteSpace($ChatFont)) { return '' }
+  $slug = ($ChatFont.Trim().ToLowerInvariant() -replace '[^a-z0-9_-]', '')
+  if ($slug -notin @('anthropic-serif', 'serif')) { return '' }
+  $snippet = @'
+<style id="claude-multi-chat-font">
+:root, html, body, .cds-root, [data-theme], [data-font], [class*="--font-claude-response"] {
+  --font-cjk-serif-lead-sc: "Noto Serif SC", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STSong" !important;
+  --font-claude-response: var(--font-anthropic-serif, "anthropic-serif", "Anthropic Serif", Georgia, "Times New Roman", serif) !important;
+  --font-user-message: var(--font-anthropic-serif, "anthropic-serif", "Anthropic Serif", Georgia, "Times New Roman", serif) !important;
+  --cds-font-voice: var(--font-anthropic-serif, "anthropic-serif", "Anthropic Serif", Georgia, serif) !important;
+}
+.prose, .prose[data-prose-font], .prose[data-prose-font="sans"] {
+  --_prose-font-body: var(--_prose-face-serif, var(--font-anthropic-serif)) !important;
+  --_prose-font-heading: var(--_prose-face-serif, var(--font-anthropic-serif)) !important;
+  --_prose-font-heading-display: var(--_prose-face-serif, var(--font-anthropic-serif)) !important;
+  --_prose-heading-weight: var(--cds-prose-weight-heading-serif, 520) !important;
+}
+.font-claude-response, .font-claude-response-body, .font-user-message, [data-testid="user-message"] {
+  font-family: var(--font-anthropic-serif, "anthropic-serif", "Anthropic Serif", Georgia, "Noto Serif SC", serif) !important;
+}
+.prose pre, .prose code, .font-claude-response pre, .font-claude-response code, .font-user-message pre, .font-user-message code {
+  font-family: var(--_prose-face-mono, var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)) !important;
+}
+</style><script id="claude-multi-chat-font-sync">try{localStorage.setItem("LSS-customStyles:chatFont",JSON.stringify({value:"serif"}));localStorage.setItem("LSS-customStyles:chatFontSynced",JSON.stringify({value:true}));}catch(_){}</script>
+'@
+  return ($snippet -replace "`r`n", "`n")
+}
+
+function Test-IsReparsePoint([string]$LiteralPath) {
+  if ([string]::IsNullOrWhiteSpace($LiteralPath)) { return $false }
+  $attr = [System.IO.File]::GetAttributes($LiteralPath)
+  if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Refusing to operate on symlink or reparse point: $LiteralPath"
+  }
+  return $false
+}
+
+function Remove-HtmlElementByOpenTag([string]$Html, [string]$OpenTag, [string]$CloseTag) {
+  if ([string]::IsNullOrEmpty($Html)) { return $Html }
+  $sb = New-Object System.Text.StringBuilder($Html.Length)
+  $pos = 0
+  while ($true) {
+    $start = $Html.IndexOf($OpenTag, $pos, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($start -lt 0) {
+      [void]$sb.Append($Html, $pos, $Html.Length - $pos)
+      break
+    }
+    $end = $Html.IndexOf($CloseTag, $start + $OpenTag.Length, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($end -lt 0) {
+      [void]$sb.Append($Html, $pos, $Html.Length - $pos)
+      break
+    }
+    [void]$sb.Append($Html, $pos, $start - $pos)
+    $pos = $end + $CloseTag.Length
+  }
+  return $sb.ToString()
+}
+
+function Read-ExactBytes([System.IO.Stream]$Stream, [int]$Count) {
+  $buf = New-Object byte[] $Count
+  $offset = 0
+  while ($offset -lt $Count) {
+    $n = $Stream.Read($buf, $offset, $Count - $offset)
+    if ($n -le 0) { throw "Unexpected EOF while reading $Count bytes from ASAR archive." }
+    $offset += $n
+  }
+  return $buf
+}
+
+function Move-FileAtomically([string]$TempPath, [string]$DestPath) {
+  $destExists = $false
+  try {
+    [void][System.IO.File]::GetAttributes($DestPath)
+    $destExists = $true
+  } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+    $destExists = $false
+  }
+  if ($destExists) {
+    [void](Test-IsReparsePoint $DestPath)
+    $attr = [System.IO.File]::GetAttributes($DestPath)
+    if (($attr -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+      [System.IO.File]::SetAttributes($DestPath, ($attr -band (-bnot [System.IO.FileAttributes]::ReadOnly)))
+    }
+    [System.IO.File]::Replace($TempPath, $DestPath, $null, $true)
+  } else {
+    [System.IO.File]::Move($TempPath, $DestPath)
+  }
+}
+
+function Update-AsarIndexHtmlFontPatch([string]$SourceAsar, [string]$DestAsar, [string]$ChatFont) {
+  $markup = Get-ChatFontInjectionMarkup $ChatFont
+  if ([string]::IsNullOrWhiteSpace($markup)) {
+    throw "Unsupported chatFont value: '$ChatFont'"
+  }
+  [void](Test-IsReparsePoint $SourceAsar)
+  $srcParent = Split-Path -Parent $SourceAsar
+  if ($srcParent -and (Test-Path -LiteralPath $srcParent)) { [void](Test-IsReparsePoint $srcParent) }
+  if (-not [System.IO.File]::Exists($SourceAsar)) {
+    throw "Source ASAR archive not found: $SourceAsar"
+  }
+
+  $destParent = Split-Path -Parent $DestAsar
+  if ($destParent) {
+    if (Test-Path -LiteralPath $destParent) {
+      [void](Test-IsReparsePoint $destParent)
+    } else {
+      New-Item -ItemType Directory -Force -Path $destParent | Out-Null
+      [void](Test-IsReparsePoint $destParent)
+    }
+  }
+  try {
+    [void](Test-IsReparsePoint $DestAsar)
+  } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+  }
+
+  if (-not ('System.Web.Script.Serialization.JavaScriptSerializer' -as [type])) {
+    Add-Type -AssemblyName System.Web.Extensions
+  }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  $tmpPath = "$DestAsar.tmp.$PID"
+  try {
+    [void](Test-IsReparsePoint $tmpPath)
+    if ([System.IO.File]::Exists($tmpPath)) { [System.IO.File]::Delete($tmpPath) }
+  } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+  }
+
+  $inStream = $null
+  $outStream = $null
+  $sha = $null
+  try {
+    $inStream = New-Object System.IO.FileStream($SourceAsar, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    if ($inStream.Length -lt 16) {
+      throw "Invalid ASAR archive (too small: $($inStream.Length) bytes): $SourceAsar"
+    }
+    $hdr = Read-ExactBytes $inStream 16
+    $u0 = [BitConverter]::ToUInt32($hdr, 0)
+    $u1 = [BitConverter]::ToUInt32($hdr, 4)
+    $u2 = [BitConverter]::ToUInt32($hdr, 8)
+    $jlen = [BitConverter]::ToUInt32($hdr, 12)
+    if ($u0 -ne 4 -or $jlen -le 0 -or $jlen -gt 67108864) {
+      throw "Invalid ASAR pickle header (u0=$u0, jlen=$jlen)"
+    }
+    $dataStart = [int64]8 + [int64]$u1
+    if ($dataStart -lt ([int64]16 + [int64]$jlen) -or $dataStart -gt $inStream.Length) {
+      throw "Invalid ASAR data boundary (dataStart=$dataStart, fileLen=$($inStream.Length))"
+    }
+    $origPayloadLen = $inStream.Length - $dataStart
+
+    $jsonBytes = Read-ExactBytes $inStream ([int]$jlen)
+    $jsonText = [System.Text.Encoding]::UTF8.GetString($jsonBytes)
+    $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $ser.MaxJsonLength = [int]::MaxValue
+    $ser.RecursionLimit = 256
+    $root = $ser.DeserializeObject($jsonText)
+    if ($null -eq $root -or -not $root.ContainsKey('files')) {
+      throw "Invalid ASAR JSON header: missing root 'files' dictionary"
+    }
+    $filesMap = $root['files']
+    if ($null -eq $filesMap -or -not $filesMap.ContainsKey('index.html')) {
+      throw "ASAR archive does not contain a root 'index.html' file entry"
+    }
+    $idxEntry = $filesMap['index.html']
+    if ($null -eq $idxEntry -or -not $idxEntry.ContainsKey('offset') -or -not $idxEntry.ContainsKey('size')) {
+      throw "ASAR 'index.html' entry is unpacked or missing offset/size"
+    }
+
+    $origOffset = [int64]::Parse([string]$idxEntry['offset'], [System.Globalization.CultureInfo]::InvariantCulture)
+    $origSizeLong = [int64]::Parse([string]$idxEntry['size'], [System.Globalization.CultureInfo]::InvariantCulture)
+    if ($origOffset -lt 0 -or $origSizeLong -lt 0 -or $origSizeLong -gt 16777216 -or ($origOffset + $origSizeLong) -gt $origPayloadLen) {
+      throw "Invalid ASAR 'index.html' bounds (offset=$origOffset, size=$origSizeLong)"
+    }
+    $origSize = [int]$origSizeLong
+
+    $inStream.Position = $dataStart + $origOffset
+    $origHtmlBytes = Read-ExactBytes $inStream $origSize
+    $origHtml = [System.Text.Encoding]::UTF8.GetString($origHtmlBytes)
+
+    $cleanHtml = Remove-HtmlElementByOpenTag $origHtml '<style id="claude-multi-chat-font">' '</style>'
+    $cleanHtml = Remove-HtmlElementByOpenTag $cleanHtml '<script id="claude-multi-chat-font-sync">' '</script>'
+    $headIdx = $cleanHtml.IndexOf('</head>', [System.StringComparison]::OrdinalIgnoreCase)
+    if ($headIdx -ge 0) {
+      $newHtml = $cleanHtml.Substring(0, $headIdx) + $markup + $cleanHtml.Substring($headIdx)
+    } else {
+      $newHtml = $cleanHtml + $markup
+    }
+    $newHtmlBytes = $utf8NoBom.GetBytes($newHtml)
+
+    $blockSize = 4194304
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fullHash = ([BitConverter]::ToString($sha.ComputeHash($newHtmlBytes)) -replace '-', '').ToLowerInvariant()
+    $blockList = New-Object System.Collections.Generic.List[string]
+    for ($pos = 0; $pos -lt $newHtmlBytes.Length; $pos += $blockSize) {
+      $chunkLen = [Math]::Min($blockSize, $newHtmlBytes.Length - $pos)
+      $bHash = ([BitConverter]::ToString($sha.ComputeHash($newHtmlBytes, $pos, $chunkLen)) -replace '-', '').ToLowerInvariant()
+      $blockList.Add($bHash)
+    }
+
+    $basePayloadLen = if (($origOffset + $origSizeLong) -eq $origPayloadLen) { $origOffset } else { $origPayloadLen }
+    $idxEntry['size'] = [int]$newHtmlBytes.Length
+    $idxEntry['offset'] = $basePayloadLen.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $idxEntry['integrity'] = @{
+      algorithm = 'SHA256'
+      hash      = $fullHash
+      blockSize = $blockSize
+      blocks    = $blockList.ToArray()
+    }
+
+    $newJsonBytes = $utf8NoBom.GetBytes($ser.Serialize($root))
+    $newJlen = [uint32]$newJsonBytes.Length
+    $alignedJlen = [uint32](($newJsonBytes.Length + 3) -band (-bnot 3))
+    $padLen = [int]($alignedJlen - $newJlen)
+    $newU1 = [uint32]($alignedJlen + 8)
+    $newU2 = [uint32]($alignedJlen + 4)
+
+    $newHdr = New-Object byte[] 16
+    [Array]::Copy([BitConverter]::GetBytes([uint32]4), 0, $newHdr, 0, 4)
+    [Array]::Copy([BitConverter]::GetBytes($newU1), 0, $newHdr, 4, 4)
+    [Array]::Copy([BitConverter]::GetBytes($newU2), 0, $newHdr, 8, 4)
+    [Array]::Copy([BitConverter]::GetBytes($newJlen), 0, $newHdr, 12, 4)
+
+    $outStream = New-Object System.IO.FileStream($tmpPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $outStream.Write($newHdr, 0, 16)
+    $outStream.Write($newJsonBytes, 0, $newJsonBytes.Length)
+    if ($padLen -gt 0) {
+      $padBytes = New-Object byte[] $padLen
+      $outStream.Write($padBytes, 0, $padLen)
+    }
+
+    $inStream.Position = $dataStart
+    $copyBuf = New-Object byte[] $blockSize
+    $remaining = $basePayloadLen
+    while ($remaining -gt 0) {
+      $toRead = [int][Math]::Min([int64]$blockSize, $remaining)
+      $readCount = $inStream.Read($copyBuf, 0, $toRead)
+      if ($readCount -le 0) { throw "Unexpected EOF while streaming ASAR payload." }
+      $outStream.Write($copyBuf, 0, $readCount)
+      $remaining -= $readCount
+    }
+
+    $outStream.Write($newHtmlBytes, 0, $newHtmlBytes.Length)
+    $outStream.Flush($true)
+    $outStream.Dispose()
+    $outStream = $null
+
+    $inStream.Dispose()
+    $inStream = $null
+
+    Move-FileAtomically -TempPath $tmpPath -DestPath $DestAsar
+    return $DestAsar
+  } catch {
+    if ($null -ne $outStream) {
+      try { $outStream.Dispose() } catch { }
+      $outStream = $null
+    }
+    try {
+      if ([System.IO.File]::Exists($tmpPath)) {
+        [void](Test-IsReparsePoint $tmpPath)
+        [System.IO.File]::Delete($tmpPath)
+      }
+    } catch { }
+    throw
+  } finally {
+    if ($null -ne $sha) { try { $sha.Dispose() } catch { } }
+    if ($null -ne $outStream) { try { $outStream.Dispose() } catch { } }
+    if ($null -ne $inStream) { try { $inStream.Dispose() } catch { } }
+  }
+}
+
+function Copy-SafeRuntimeTree([string]$SourceDir, [string]$DestDir, [string[]]$ExcludeNames = @()) {
+  [void](Test-IsReparsePoint $SourceDir)
+  if (Test-Path -LiteralPath $DestDir) {
+    [void](Test-IsReparsePoint $DestDir)
+  } else {
+    New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
+    [void](Test-IsReparsePoint $DestDir)
+  }
+  foreach ($item in (Get-ChildItem -LiteralPath $SourceDir -Force)) {
+    $skip = $false
+    foreach ($ex in $ExcludeNames) {
+      if ($item.Name -ieq $ex) { $skip = $true; break }
+    }
+    if ($skip) { continue }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+    $targetPath = Join-Path $DestDir $item.Name
+    if ($item.PSIsContainer) {
+      Copy-SafeRuntimeTree -SourceDir $item.FullName -DestDir $targetPath
+    } else {
+      try {
+        [void](Test-IsReparsePoint $targetPath)
+        if ([System.IO.File]::Exists($targetPath)) {
+          $tAttr = [System.IO.File]::GetAttributes($targetPath)
+          if (($tAttr -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+            [System.IO.File]::SetAttributes($targetPath, ($tAttr -band (-bnot [System.IO.FileAttributes]::ReadOnly)))
+          }
+        }
+      } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+      }
+      [System.IO.File]::Copy($item.FullName, $targetPath, $true)
+    }
+  }
+}
+
+function Ensure-PatchedClaudeRuntime([string]$SourceExe, [string]$ChatFont) {
+  if ([string]::IsNullOrWhiteSpace($ChatFont) -or [string]::IsNullOrWhiteSpace($SourceExe)) { return $SourceExe }
+  $slug = ($ChatFont.Trim().ToLowerInvariant() -replace '[^a-z0-9_-]', '')
+  if ([string]::IsNullOrWhiteSpace((Get-ChatFontInjectionMarkup $slug))) { return $SourceExe }
+  if (-not (Test-Path -LiteralPath $SourceExe)) { return $SourceExe }
+
+  $srcAppDir = Split-Path -Parent $SourceExe
+  $pkgDir = Split-Path -Parent $srcAppDir
+  $srcResDir = Join-Path $srcAppDir 'resources'
+  $srcIon = Join-Path $srcResDir 'ion-dist.asar'
+  if (-not (Test-Path -LiteralPath $srcIon)) { return $SourceExe }
+
+  [void](Test-IsReparsePoint $SourceExe)
+  [void](Test-IsReparsePoint $srcAppDir)
+  [void](Test-IsReparsePoint $pkgDir)
+  [void](Test-IsReparsePoint $srcResDir)
+  [void](Test-IsReparsePoint $srcIon)
+
+  $ionInfo = Get-Item -LiteralPath $srcIon -Force
+  $pkgLeaf = (Split-Path -Leaf $pkgDir) -replace '[^A-Za-z0-9._-]', '_'
+  $cacheKey = [ordered]@{
+    schemaVersion    = 'v1'
+    pkgName          = $pkgLeaf
+    ionSize          = [int64]$ionInfo.Length
+    ionMtimeUtcTicks = [int64]$ionInfo.LastWriteTimeUtc.Ticks
+    chatFont         = $slug
+  }
+
+  if (Test-Path -LiteralPath $HomeRoot) { [void](Test-IsReparsePoint $HomeRoot) }
+  $rtRoot = Join-Path $HomeRoot 'runtime'
+  if (Test-Path -LiteralPath $rtRoot) { [void](Test-IsReparsePoint $rtRoot) }
+  $rtPkgDir = Join-Path $rtRoot "$($cacheKey.pkgName)_$slug"
+  if (Test-Path -LiteralPath $rtPkgDir) { [void](Test-IsReparsePoint $rtPkgDir) }
+  $rtAppDir = Join-Path $rtPkgDir 'app'
+  $rtResDir = Join-Path $rtAppDir 'resources'
+  $rtExe = Join-Path $rtAppDir (Split-Path -Leaf $SourceExe)
+  $rtIon = Join-Path $rtResDir 'ion-dist.asar'
+  $manifestPath = Join-Path $rtPkgDir '.patch-manifest.json'
+
+  if ((Test-Path -LiteralPath $manifestPath) -and (Test-Path -LiteralPath $rtExe) -and (Test-Path -LiteralPath $rtIon)) {
+    [void](Test-IsReparsePoint $rtAppDir)
+    [void](Test-IsReparsePoint $rtResDir)
+    [void](Test-IsReparsePoint $manifestPath)
+    [void](Test-IsReparsePoint $rtExe)
+    [void](Test-IsReparsePoint $rtIon)
+    try {
+      $m = [System.IO.File]::ReadAllText($manifestPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+      if (
+        $null -ne $m -and
+        ([string]$m.schemaVersion -eq [string]$cacheKey.schemaVersion) -and
+        ([string]$m.pkgName -eq [string]$cacheKey.pkgName) -and
+        ([int64]$m.ionSize -eq [int64]$cacheKey.ionSize) -and
+        ([int64]$m.ionMtimeUtcTicks -eq [int64]$cacheKey.ionMtimeUtcTicks) -and
+        ([string]$m.chatFont -eq [string]$cacheKey.chatFont)
+      ) {
+        return $rtExe
+      }
+    } catch { }
+  }
+
+  New-Item -ItemType Directory -Force -Path $rtResDir | Out-Null
+  [void](Test-IsReparsePoint $rtRoot)
+  [void](Test-IsReparsePoint $rtPkgDir)
+  [void](Test-IsReparsePoint $rtAppDir)
+  [void](Test-IsReparsePoint $rtResDir)
+
+  if (Test-Path -LiteralPath $manifestPath) {
+    [void](Test-IsReparsePoint $manifestPath)
+    [System.IO.File]::Delete($manifestPath)
+  }
+
+  Copy-SafeRuntimeTree -SourceDir $srcAppDir -DestDir $rtAppDir -ExcludeNames @('resources')
+  Copy-SafeRuntimeTree -SourceDir $srcResDir -DestDir $rtResDir -ExcludeNames @('ion-dist.asar')
+  [void](Update-AsarIndexHtmlFontPatch -SourceAsar $srcIon -DestAsar $rtIon -ChatFont $slug)
+
+  $tmpManifest = "$manifestPath.tmp.$PID"
+  try {
+    try {
+      [void](Test-IsReparsePoint $tmpManifest)
+      if ([System.IO.File]::Exists($tmpManifest)) { [System.IO.File]::Delete($tmpManifest) }
+    } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+    }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $manifestBytes = $utf8NoBom.GetBytes(($cacheKey | ConvertTo-Json -Compress))
+    [System.IO.File]::WriteAllBytes($tmpManifest, $manifestBytes)
+    Move-FileAtomically -TempPath $tmpManifest -DestPath $manifestPath
+  } catch {
+    try {
+      if ([System.IO.File]::Exists($tmpManifest)) {
+        [void](Test-IsReparsePoint $tmpManifest)
+        [System.IO.File]::Delete($tmpManifest)
+      }
+    } catch { }
+    throw
+  }
+
+  return $rtExe
+}
+
 function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [switch]$Show) {
   $pkg = Get-ClaudePackage
-  $exe = Join-Path $pkg.InstallLocation 'app\Claude.exe'
+  $pkgExe = Join-Path $pkg.InstallLocation 'app\Claude.exe'
+  $exe = $pkgExe
   # 2026-10-17: direct CreateProcess on the WindowsApps exe started failing with
   # "Access is denied" (ACLs unchanged - policy tightening on direct package-exe
   # launches). The app execution alias is the sanctioned activation path and
   # forwards the command line unchanged, so prefer it when present.
   $aliasExe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\claude-desktop-msstore.exe'
   if (Test-Path $aliasExe) { $exe = $aliasExe }
+  $chatFont = if ($i.PSObject.Properties['chatFont'] -and $i.chatFont) { ([string]$i.chatFont).Trim().ToLowerInvariant() } else { '' }
+  if ($chatFont) {
+    $patchedExe = Ensure-PatchedClaudeRuntime -SourceExe $pkgExe -ChatFont $chatFont
+    if ($patchedExe -and $patchedExe -ne $pkgExe) { $exe = $patchedExe }
+  }
   $data = Get-DataDir $i
   $args_ = @()
   if ($Url) { $args_ += "`"$Url`"" }

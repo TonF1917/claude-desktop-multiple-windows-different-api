@@ -1,4 +1,9 @@
+import hashlib
+import json
 import os
+import shutil
+import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -245,6 +250,235 @@ class TestSecurity(unittest.TestCase):
             self.assertEqual(env['CLAUDE_MULTI_STARTUP_IP'], '203.0.113.10')
             self.assertEqual(env['CLAUDE_MULTI_EXIT_POLICY'], 'block')
             self.assertIn(f'--require "{shield_path}"', env['NODE_OPTIONS'])
+
+    @staticmethod
+    def _build_synthetic_asar(asar_path: Path, index_html_text: str, app_js_text: str = 'console.log("app");\n') -> bytes:
+        app_bytes = app_js_text.encode('utf-8')
+        html_bytes = index_html_text.encode('utf-8')
+        block_size = 4 * 1024 * 1024
+
+        def _integrity(data: bytes) -> dict:
+            return {
+                'algorithm': 'SHA256',
+                'hash': hashlib.sha256(data).hexdigest(),
+                'blockSize': block_size,
+                'blocks': [
+                    hashlib.sha256(data[pos:pos + block_size]).hexdigest()
+                    for pos in range(0, len(data), block_size)
+                ],
+            }
+
+        header_obj = {
+            'files': {
+                'assets': {
+                    'files': {
+                        'app.js': {
+                            'size': len(app_bytes),
+                            'offset': '0',
+                            'integrity': _integrity(app_bytes),
+                        }
+                    }
+                },
+                'index.html': {
+                    'size': len(html_bytes),
+                    'offset': str(len(app_bytes)),
+                    'integrity': _integrity(html_bytes),
+                },
+            }
+        }
+        json_bytes = json.dumps(header_obj, separators=(',', ':')).encode('utf-8')
+        jlen = len(json_bytes)
+        aligned_jlen = (jlen + 3) & ~3
+        pad_len = aligned_jlen - jlen
+        u1 = aligned_jlen + 8
+        u2 = aligned_jlen + 4
+        hdr = struct.pack('<IIII', 4, u1, u2, jlen)
+        payload = app_bytes + html_bytes
+        asar_path.write_bytes(hdr + json_bytes + (b'\x00' * pad_len) + payload)
+        return app_bytes
+
+    def _parse_and_verify_asar(self, asar_path: Path):
+        raw = asar_path.read_bytes()
+        self.assertGreaterEqual(len(raw), 16)
+        u0, u1, u2, jlen = struct.unpack('<IIII', raw[:16])
+        self.assertEqual(u0, 4)
+        aligned_jlen = (jlen + 3) & ~3
+        self.assertEqual(u2, aligned_jlen + 4)
+        self.assertEqual(u1, aligned_jlen + 8)
+        data_start = 8 + u1
+        self.assertEqual(data_start, 16 + aligned_jlen)
+        json_bytes = raw[16:16 + jlen]
+        self.assertFalse(json_bytes.startswith(b'\xef\xbb\xbf'), 'JSON header must not have UTF-8 BOM')
+        header = json.loads(json_bytes.decode('utf-8'))
+        payload = raw[data_start:]
+        return header, payload
+
+    def test_patch_asar_index_html_font_python(self):
+        """Python ASAR patcher must append patched index.html, preserve existing offsets, update SHA256 integrity, and be idempotent."""
+        orig_html = (
+            '<!doctype html><html lang="en-US"><head><meta charset="utf-8">'
+            '<title>Claude</title></head><body><div id="root"></div></body></html>'
+        )
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            src_asar = td_path / 'ion-dist.asar'
+            dst_asar = td_path / 'out' / 'ion-dist.asar'
+            app_bytes = self._build_synthetic_asar(src_asar, orig_html)
+
+            res = cm.patch_asar_index_html_font(src_asar, dst_asar, 'anthropic-serif')
+            self.assertEqual(res, dst_asar)
+            self.assertTrue(dst_asar.is_file())
+
+            header, payload = self._parse_and_verify_asar(dst_asar)
+            app_entry = header['files']['assets']['files']['app.js']
+            self.assertEqual(app_entry['offset'], '0')
+            self.assertEqual(app_entry['size'], len(app_bytes))
+            self.assertEqual(payload[:len(app_bytes)], app_bytes)
+
+            idx_entry = header['files']['index.html']
+            idx_offset = int(idx_entry['offset'])
+            idx_size = int(idx_entry['size'])
+            patched_html_bytes = payload[idx_offset:idx_offset + idx_size]
+            self.assertFalse(patched_html_bytes.startswith(b'\xef\xbb\xbf'))
+            patched_html = patched_html_bytes.decode('utf-8')
+
+            self.assertIn('id="claude-multi-chat-font"', patched_html)
+            self.assertIn('id="claude-multi-chat-font-sync"', patched_html)
+            self.assertIn('--font-claude-response: var(--font-anthropic-serif', patched_html)
+            self.assertIn('--font-cjk-serif-lead-sc: "Noto Serif SC"', patched_html)
+            self.assertLess(patched_html.index('id="claude-multi-chat-font"'), patched_html.lower().index('</head>'))
+
+            expected_hash = hashlib.sha256(patched_html_bytes).hexdigest()
+            self.assertEqual(idx_entry['integrity']['algorithm'], 'SHA256')
+            self.assertEqual(idx_entry['integrity']['blockSize'], 4194304)
+            self.assertEqual(idx_entry['integrity']['hash'], expected_hash)
+            self.assertEqual(idx_entry['integrity']['blocks'], [expected_hash])
+
+            # Second pass must be strictly idempotent (including archive byte length)
+            dst_asar_2 = td_path / 'out' / 'ion-dist-2.asar'
+            cm.patch_asar_index_html_font(dst_asar, dst_asar_2, 'anthropic-serif')
+            header2, payload2 = self._parse_and_verify_asar(dst_asar_2)
+            idx_entry2 = header2['files']['index.html']
+            patched_html_2 = payload2[
+                int(idx_entry2['offset']):int(idx_entry2['offset']) + int(idx_entry2['size'])
+            ].decode('utf-8')
+            self.assertEqual(patched_html_2.count('id="claude-multi-chat-font"'), 1)
+            self.assertEqual(patched_html_2.count('id="claude-multi-chat-font-sync"'), 1)
+            self.assertEqual(patched_html_2, patched_html)
+            self.assertEqual(len(payload2), len(payload))
+
+    def test_patch_asar_rejects_symlink(self):
+        """Symlinked source ASAR must be rejected to prevent symlink traversal attacks."""
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            real_asar = td_path / 'real.asar'
+            self._build_synthetic_asar(real_asar, '<html><head></head><body></body></html>')
+            link_asar = td_path / 'link.asar'
+            try:
+                link_asar.symlink_to(real_asar)
+            except OSError as exc:
+                self.skipTest(f'Symlink creation not permitted in this environment: {exc}')
+
+            with self.assertRaises((ValueError, RuntimeError)):
+                cm.patch_asar_index_html_font(link_asar, td_path / 'out.asar', 'anthropic-serif')
+
+    def test_build_env_chat_font_cleanup_and_set(self):
+        """CLAUDE_MULTI_CHAT_FONT must be stripped from inherited env and populated when chatFont is configured."""
+        base = {'CLAUDE_MULTI_CHAT_FONT': 'stale-font', 'PATH': '/usr/bin'}
+        inst_unset = {'id': 'official', 'name': 'Claude Official', 'primary': True}
+        env_unset = cm.build_env(inst_unset, base=base)
+        self.assertNotIn('CLAUDE_MULTI_CHAT_FONT', env_unset)
+
+        inst_serif = {'id': '3p', 'name': 'Claude 3P', 'chatFont': '  Anthropic-Serif '}
+        env_serif = cm.build_env(inst_serif, base=base)
+        self.assertEqual(env_serif['CLAUDE_MULTI_CHAT_FONT'], 'anthropic-serif')
+
+    @unittest.skipIf(shutil.which('powershell.exe') is None, 'powershell.exe not available')
+    def test_powershell_asar_font_patch_parity(self):
+        """PowerShell Update-AsarIndexHtmlFontPatch and Ensure-PatchedClaudeRuntime must produce byte-accurate ASARs and valid cache manifests."""
+        orig_html = (
+            '<!doctype html><html lang="en-US"><head><meta charset="utf-8">'
+            '<title>Claude</title></head><body><div id="root"></div></body></html>'
+        )
+        core_ps1 = Path(__file__).resolve().parent.parent / 'src' / 'Core.ps1'
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            pkg_dir = td_path / 'AnthropicPBC.Claude_1.3455.0.0_x64__pzs8sxrjxfjjc'
+            app_dir = pkg_dir / 'app'
+            res_dir = app_dir / 'resources'
+            res_dir.mkdir(parents=True)
+            fake_exe = app_dir / 'Claude.exe'
+            fake_exe.write_bytes(b'MZ-fake-claude-exe')
+            src_asar = res_dir / 'ion-dist.asar'
+            app_bytes = self._build_synthetic_asar(src_asar, orig_html)
+
+            dst_asar = td_path / 'ps-out.asar'
+            dst_asar_2 = td_path / 'ps-out-2.asar'
+            home_root = td_path / 'home-multi'
+
+            ps_cmd = (
+                f". '{core_ps1}'; "
+                f"$script:HomeRoot = '{home_root}'; "
+                f"Update-AsarIndexHtmlFontPatch -SourceAsar '{src_asar}' -DestAsar '{dst_asar}' -ChatFont 'anthropic-serif' | Out-Null; "
+                f"Update-AsarIndexHtmlFontPatch -SourceAsar '{dst_asar}' -DestAsar '{dst_asar_2}' -ChatFont 'anthropic-serif' | Out-Null; "
+                f"$rtExe = Ensure-PatchedClaudeRuntime -SourceExe '{fake_exe}' -ChatFont 'anthropic-serif'; "
+                f"Write-Output ('RT_EXE=' + $rtExe)"
+            )
+            proc = subprocess.run(
+                ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, f'PowerShell failed: {proc.stderr}\n{proc.stdout}')
+            self.assertTrue(dst_asar.is_file())
+            self.assertTrue(dst_asar_2.is_file())
+
+            header, payload = self._parse_and_verify_asar(dst_asar)
+            app_entry = header['files']['assets']['files']['app.js']
+            self.assertEqual(app_entry['offset'], '0')
+            self.assertEqual(app_entry['size'], len(app_bytes))
+            self.assertEqual(payload[:len(app_bytes)], app_bytes)
+
+            idx_entry = header['files']['index.html']
+            idx_offset = int(idx_entry['offset'])
+            idx_size = int(idx_entry['size'])
+            patched_bytes = payload[idx_offset:idx_offset + idx_size]
+            self.assertFalse(patched_bytes.startswith(b'\xef\xbb\xbf'))
+            patched_html = patched_bytes.decode('utf-8')
+
+            self.assertEqual(patched_html.count('id="claude-multi-chat-font"'), 1)
+            self.assertEqual(patched_html.count('id="claude-multi-chat-font-sync"'), 1)
+            self.assertIn('--font-claude-response: var(--font-anthropic-serif', patched_html)
+            self.assertIn('--font-cjk-serif-lead-sc: "Noto Serif SC"', patched_html)
+
+            expected_hash = hashlib.sha256(patched_bytes).hexdigest()
+            self.assertEqual(idx_entry['integrity']['algorithm'], 'SHA256')
+            self.assertEqual(idx_entry['integrity']['blockSize'], 4194304)
+            self.assertEqual(idx_entry['integrity']['hash'], expected_hash)
+            self.assertEqual(idx_entry['integrity']['blocks'], [expected_hash])
+
+            header2, payload2 = self._parse_and_verify_asar(dst_asar_2)
+            idx_entry2 = header2['files']['index.html']
+            patched_bytes_2 = payload2[int(idx_entry2['offset']):int(idx_entry2['offset']) + int(idx_entry2['size'])]
+            self.assertEqual(patched_bytes_2, patched_bytes)
+
+            # Verify Ensure-PatchedClaudeRuntime output and .patch-manifest.json
+            rt_pkg_dir = home_root / 'runtime' / 'AnthropicPBC.Claude_1.3455.0.0_x64__pzs8sxrjxfjjc_anthropic-serif'
+            rt_exe = rt_pkg_dir / 'app' / 'Claude.exe'
+            rt_ion = rt_pkg_dir / 'app' / 'resources' / 'ion-dist.asar'
+            manifest_path = rt_pkg_dir / '.patch-manifest.json'
+            self.assertIn(f'RT_EXE={rt_exe}', proc.stdout)
+            self.assertTrue(rt_exe.is_file())
+            self.assertTrue(rt_ion.is_file())
+            self.assertTrue(manifest_path.is_file())
+            manifest_raw = manifest_path.read_bytes()
+            self.assertFalse(manifest_raw.startswith(b'\xef\xbb\xbf'))
+            manifest = json.loads(manifest_raw.decode('utf-8'))
+            self.assertEqual(manifest['schemaVersion'], 'v1')
+            self.assertEqual(manifest['pkgName'], 'AnthropicPBC.Claude_1.3455.0.0_x64__pzs8sxrjxfjjc')
+            self.assertEqual(manifest['ionSize'], src_asar.stat().st_size)
+            self.assertEqual(manifest['chatFont'], 'anthropic-serif')
 
 
 if __name__ == '__main__':

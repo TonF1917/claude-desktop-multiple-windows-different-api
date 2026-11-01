@@ -22,6 +22,11 @@
 * **`claude://` 链接**打开到你最近使用的窗口(或固定某一个)。
 * **同一会话在两个窗口同时发消息?** 在两份记录分叉之前,Windows 会弹通知提醒你。
 * **更新无忧:** Windows 上不拷贝、不修改应用,每次启动都从商店包解析安装路径。
+* **Prism 级防关联与网络隔离加固:**
+  * **双源 GeoIP 共识校验与自动网络身份对齐:** 启动前通过实例代理并发探测 `ipwho.is` 与 `ipapi.co`,自动将 `TZ`、`--lang` 与 `Accept-Language`(基于 `COUNTRY_NETWORK_MAP`)对齐至出口国家/时区,持久化 `.proxy-identity.json`,并支持 `proxyExitPolicy: "block"` 在出口 IP 漂移或 GeoIP 冲突时直接阻断启动。
+  * **运行时代理漂移熔断器(`shield.cjs`):** 通过 `NODE_OPTIONS` 注入 Node.js 网络防护层,后台定时复核出口 IP(`CLAUDE_MULTI_STARTUP_IP`),一旦代理掉线或出口 IP 发生漂移即刻触发 `_networkQuarantined` 熔断所有非本地 `http` / `https` / `fetch` 外发请求并记录 `.proxy-quarantine.log`。
+  * **Chromium DNS / QUIC / WebRTC 深度加固:** 注入 `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost , EXCLUDE ::1"`、`--disable-quic`、`--dns-prefetch-disable`、`--enforce-webrtc-ip-permission-check`,并在启动前预写 `Default/Preferences`(强制 `disable_non_proxied_udp`)及清理残留 `DevToolsActivePort`。
+  * **配置目录身份锚点(`.profile-identity.json`):** 将每个 `user-data-dir` 与其所属 `instanceId` 强绑定并拒绝符号链接穿透,防止多账号配置目录交叉污染。
 
 ## Windows 快速开始
 

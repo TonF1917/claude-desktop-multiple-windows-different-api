@@ -78,6 +78,8 @@ def validate_timezone(value):
     v = (value or '').strip()
     if not v:
         return None
+    if v.lower() == 'auto':
+        return 'auto'
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+){0,2}', v):
         raise ClaudeMultiError(f"invalid timezone '{v}' (use an IANA name such as America/Toronto)")
     zi = Path('/usr/share/zoneinfo')
@@ -87,17 +89,316 @@ def validate_timezone(value):
 
 _LANGS = {'America/Toronto': 'en-CA', 'America/Vancouver': 'en-CA', 'America/Mexico_City': 'es-MX', 'America/Sao_Paulo': 'pt-BR',
           'Europe/London': 'en-GB', 'Europe/Paris': 'fr-FR', 'Europe/Berlin': 'de-DE', 'Europe/Madrid': 'es-ES', 'Europe/Moscow': 'ru-RU',
-          'Asia/Jakarta': 'id-ID', 'Asia/Singapore': 'en-SG', 'Asia/Tokyo': 'ja-JP', 'Asia/Seoul': 'ko-KR', 'Asia/Shanghai': 'zh-CN',
-          'Asia/Hong_Kong': 'zh-HK', 'Asia/Kolkata': 'en-IN', 'Asia/Dubai': 'en-AE', 'Pacific/Auckland': 'en-NZ'}
+          'Europe/Amsterdam': 'nl-NL', 'Asia/Jakarta': 'id-ID', 'Asia/Singapore': 'en-SG', 'Asia/Tokyo': 'ja-JP', 'Asia/Seoul': 'ko-KR',
+          'Asia/Shanghai': 'zh-CN', 'Asia/Hong_Kong': 'zh-HK', 'Asia/Taipei': 'zh-TW', 'Asia/Kolkata': 'en-IN', 'Asia/Dubai': 'en-AE',
+          'Pacific/Auckland': 'en-NZ'}
+
+COUNTRY_NETWORK_MAP = {
+    'US': {'timezone': 'America/New_York', 'lang': 'en-US', 'accept_language': 'en-US,en;q=0.9'},
+    'CA': {'timezone': 'America/Toronto', 'lang': 'en-CA', 'accept_language': 'en-CA,en;q=0.9'},
+    'GB': {'timezone': 'Europe/London', 'lang': 'en-GB', 'accept_language': 'en-GB,en;q=0.9'},
+    'SG': {'timezone': 'Asia/Singapore', 'lang': 'en-SG', 'accept_language': 'en-SG,en;q=0.9'},
+    'KR': {'timezone': 'Asia/Seoul', 'lang': 'ko-KR', 'accept_language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'JP': {'timezone': 'Asia/Tokyo', 'lang': 'ja-JP', 'accept_language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'DE': {'timezone': 'Europe/Berlin', 'lang': 'de-DE', 'accept_language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'FR': {'timezone': 'Europe/Paris', 'lang': 'fr-FR', 'accept_language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'NL': {'timezone': 'Europe/Amsterdam', 'lang': 'nl-NL', 'accept_language': 'nl-NL,nl;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'AU': {'timezone': 'Australia/Sydney', 'lang': 'en-AU', 'accept_language': 'en-AU,en;q=0.9'},
+    'HK': {'timezone': 'Asia/Hong_Kong', 'lang': 'zh-HK', 'accept_language': 'zh-HK,zh;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'TW': {'timezone': 'Asia/Taipei', 'lang': 'zh-TW', 'accept_language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'IN': {'timezone': 'Asia/Kolkata', 'lang': 'en-IN', 'accept_language': 'en-IN,en;q=0.9'},
+    'BR': {'timezone': 'America/Sao_Paulo', 'lang': 'pt-BR', 'accept_language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'ID': {'timezone': 'Asia/Jakarta', 'lang': 'id-ID', 'accept_language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'MX': {'timezone': 'America/Mexico_City', 'lang': 'es-MX', 'accept_language': 'es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'ES': {'timezone': 'Europe/Madrid', 'lang': 'es-ES', 'accept_language': 'es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'RU': {'timezone': 'Europe/Moscow', 'lang': 'ru-RU', 'accept_language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'},
+    'AE': {'timezone': 'Asia/Dubai', 'lang': 'en-AE', 'accept_language': 'en-AE,en;q=0.9'},
+    'NZ': {'timezone': 'Pacific/Auckland', 'lang': 'en-NZ', 'accept_language': 'en-NZ,en;q=0.9'},
+}
 
 def lang_for(i):
     """Chromium --lang for an instance: explicit `lang`, else derived from its timezone, else None (leave the app's default)."""
-    if i.get('lang'):
+    if i.get('lang') and i.get('lang') != 'auto':
         return i['lang']
     tz = i.get('timezone')
-    if not tz:
+    if not tz or tz == 'auto':
         return None
     return _LANGS.get(tz) or ('en-AU' if tz.startswith('Australia/') else 'en-US')
+
+
+def _reject_symlink(path):
+    p = Path(path)
+    if p.is_symlink():
+        raise ClaudeMultiError(f'refusing symlink target: {p}')
+
+
+def _atomic_write_text(path, text, mode=0o600):
+    p = Path(path)
+    _reject_symlink(p)
+    if p.parent.is_symlink():
+        raise ClaudeMultiError(f'refusing symlink parent directory: {p.parent}')
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f'.{p.name}.tmp.{os.getpid()}')
+    _reject_symlink(tmp)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(text)
+        if os.name == 'posix':
+            os.chmod(tmp, mode)
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_json(path, data, mode=0o600):
+    _atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + '\n', mode=mode)
+
+
+def assert_profile_data_identity(user_data_dir, instance_id):
+    """Verify or initialize .profile-identity.json inside user_data_dir to prevent cross-account profile contamination."""
+    udd = Path(user_data_dir)
+    _reject_symlink(udd)
+    udd.mkdir(parents=True, exist_ok=True)
+    ident_file = udd / '.profile-identity.json'
+    _reject_symlink(ident_file)
+    if ident_file.exists():
+        try:
+            existing = json.loads(ident_file.read_text(encoding='utf-8-sig'))
+        except (OSError, ValueError) as e:
+            raise ClaudeMultiError(f'corrupted profile identity in {ident_file}: {e}') from None
+        existing_id = existing.get('instanceId') if isinstance(existing, dict) else None
+        if existing_id != instance_id:
+            raise ClaudeMultiError(
+                f"profile identity mismatch in {udd}: expected instanceId '{instance_id}', found '{existing_id}'. "
+                "Refusing to launch to prevent cross-account profile contamination."
+            )
+        return existing
+    payload = {
+        'contractVersion': 1,
+        'instanceId': instance_id,
+        'createdAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+    }
+    _atomic_write_json(ident_file, payload)
+    return payload
+
+
+def ensure_profile_preferences(user_data_dir, lang=None):
+    """Pre-write Chromium Default/Preferences with WebRTC leak prevention and clean stale DevToolsActivePort."""
+    udd = Path(user_data_dir)
+    _reject_symlink(udd)
+    udd.mkdir(parents=True, exist_ok=True)
+
+    devtools_port = udd / 'DevToolsActivePort'
+    _reject_symlink(devtools_port)
+    if devtools_port.exists():
+        try:
+            devtools_port.unlink()
+        except OSError:
+            pass
+
+    default_dir = udd / 'Default'
+    _reject_symlink(default_dir)
+    default_dir.mkdir(parents=True, exist_ok=True)
+    prefs_file = default_dir / 'Preferences'
+    _reject_symlink(prefs_file)
+
+    prefs = {}
+    if prefs_file.exists():
+        try:
+            loaded = json.loads(prefs_file.read_text(encoding='utf-8-sig'))
+            if isinstance(loaded, dict):
+                prefs = loaded
+        except (OSError, ValueError):
+            prefs = {}
+
+    webrtc = prefs.get('webrtc')
+    if not isinstance(webrtc, dict):
+        webrtc = {}
+    webrtc['ip_handling_policy'] = 'disable_non_proxied_udp'
+    webrtc['multiple_routes_enabled'] = False
+    webrtc['nonproxied_udp_enabled'] = False
+    prefs['webrtc'] = webrtc
+
+    if lang:
+        intl = prefs.get('intl')
+        if not isinstance(intl, dict):
+            intl = {}
+        intl['accept_languages'] = lang
+        prefs['intl'] = intl
+
+    _atomic_write_json(prefs_file, prefs)
+    return prefs
+
+
+SHIELD_CJS_CONTENT = r"""'use strict';
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const { execFile } = require('child_process');
+
+const PROXY_URL = process.env.CLAUDE_MULTI_PROXY_URL || '';
+const STARTUP_IP = (process.env.CLAUDE_MULTI_STARTUP_IP || '').trim();
+const EXIT_POLICY = (process.env.CLAUDE_MULTI_EXIT_POLICY || (STARTUP_IP ? 'block' : 'warn')).toLowerCase();
+const MONITOR_INTERVAL_MS = Math.max(5000, parseInt(process.env.CLAUDE_MULTI_MONITOR_INTERVAL_MS || '300000', 10) || 300000);
+const USER_DATA_DIR = process.env.CLAUDE_MULTI_USER_DATA_DIR || '';
+
+let _networkQuarantined = false;
+let _quarantineReason = '';
+let _consecutiveFailures = 0;
+
+function isLocalHost(host) {
+  if (!host) return false;
+  const h = String(host).toLowerCase().replace(/^\[|\]$/g, '').split(':')[0];
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+}
+
+function extractTargetHost(input, options) {
+  try {
+    if (typeof input === 'string' || input instanceof URL) {
+      const u = new URL(String(input));
+      return u.hostname;
+    }
+    if (input && typeof input === 'object') {
+      return input.hostname || input.host || (options && (options.hostname || options.host)) || '';
+    }
+  } catch (_) {}
+  if (options && typeof options === 'object') {
+    return options.hostname || options.host || '';
+  }
+  return '';
+}
+
+function writeQuarantineLog(reason) {
+  if (!USER_DATA_DIR) return;
+  try {
+    if (!fs.existsSync(USER_DATA_DIR) || fs.lstatSync(USER_DATA_DIR).isSymbolicLink()) return;
+    const logPath = path.join(USER_DATA_DIR, '.proxy-quarantine.log');
+    if (fs.existsSync(logPath) && fs.lstatSync(logPath).isSymbolicLink()) return;
+    const line = `${new Date().toISOString()} [QUARANTINE] policy=${EXIT_POLICY} startupIp=${STARTUP_IP} reason=${reason}\n`;
+    fs.appendFileSync(logPath, line, { encoding: 'utf8', mode: 0o600 });
+  } catch (_) {}
+}
+
+function tripQuarantine(reason) {
+  _quarantineReason = String(reason || 'proxy exit drift detected');
+  writeQuarantineLog(_quarantineReason);
+  if (EXIT_POLICY === 'block') {
+    _networkQuarantined = true;
+  }
+}
+
+function assertNotQuarantined(host) {
+  if (_networkQuarantined && !isLocalHost(host)) {
+    throw new Error(`[Claude-Multi Shield] Network quarantined due to proxy exit drift: ${_quarantineReason}`);
+  }
+}
+
+const origHttpRequest = http.request;
+http.request = function(input, options, cb) {
+  assertNotQuarantined(extractTargetHost(input, options));
+  return origHttpRequest.apply(this, arguments);
+};
+
+const origHttpGet = http.get;
+http.get = function(input, options, cb) {
+  assertNotQuarantined(extractTargetHost(input, options));
+  return origHttpGet.apply(this, arguments);
+};
+
+const origHttpsRequest = https.request;
+https.request = function(input, options, cb) {
+  assertNotQuarantined(extractTargetHost(input, options));
+  return origHttpsRequest.apply(this, arguments);
+};
+
+const origHttpsGet = https.get;
+https.get = function(input, options, cb) {
+  assertNotQuarantined(extractTargetHost(input, options));
+  return origHttpsGet.apply(this, arguments);
+};
+
+if (typeof globalThis.fetch === 'function') {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = function(input, init) {
+    try {
+      const urlStr = (typeof input === 'string' || input instanceof URL) ? String(input) : (input && input.url ? input.url : '');
+      assertNotQuarantined(extractTargetHost(urlStr, init));
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return origFetch.apply(this, arguments);
+  };
+}
+
+function probeExitIpOnce(url, cb) {
+  const curlBin = process.platform === 'win32' ? 'curl.exe' : 'curl';
+  execFile(curlBin, ['-x', PROXY_URL, '-s', '--max-time', '6', url], { timeout: 7000, maxBuffer: 65536 }, (err, stdout) => {
+    if (err || !stdout) return cb(null);
+    try {
+      const data = JSON.parse(stdout);
+      const ip = String(data.ip || '').trim();
+      return cb(ip || null);
+    } catch (_) {
+      return cb(null);
+    }
+  });
+}
+
+function verifyRuntimeExitIp() {
+  probeExitIpOnce('https://ipwho.is/', (ip1) => {
+    if (ip1) {
+      _consecutiveFailures = 0;
+      if (ip1 !== STARTUP_IP) {
+        tripQuarantine(`exit IP drifted from ${STARTUP_IP} to ${ip1}`);
+      }
+      return;
+    }
+    probeExitIpOnce('https://api.ipify.org?format=json', (ip2) => {
+      if (ip2) {
+        _consecutiveFailures = 0;
+        if (ip2 !== STARTUP_IP) {
+          tripQuarantine(`exit IP drifted from ${STARTUP_IP} to ${ip2}`);
+        }
+        return;
+      }
+      _consecutiveFailures += 1;
+      if (_consecutiveFailures >= 2) {
+        tripQuarantine(`proxy unreachable for ${_consecutiveFailures} consecutive checks`);
+      }
+    });
+  });
+}
+
+if (PROXY_URL && STARTUP_IP) {
+  const timer = setInterval(verifyRuntimeExitIp, MONITOR_INTERVAL_MS);
+  if (timer && typeof timer.unref === 'function') {
+    timer.unref();
+  }
+}
+
+module.exports = {
+  isQuarantined: () => _networkQuarantined,
+  getQuarantineReason: () => _quarantineReason,
+  tripQuarantine,
+};
+"""
+
+
+def ensure_shield_script(user_data_dir):
+    """Write shield.cjs into user_data_dir atomically after symlink verification."""
+    udd = Path(user_data_dir)
+    _reject_symlink(udd)
+    udd.mkdir(parents=True, exist_ok=True)
+    shield_path = udd / 'shield.cjs'
+    _atomic_write_text(shield_path, SHIELD_CJS_CONTENT, mode=0o600)
+    return shield_path
+
 
 
 # ------------------------------------------------------------------ config
@@ -474,10 +775,10 @@ def running(i):
             pids.append((int(m.group(1)), _started(m.group(2))))
     return pids
 
-def build_env(i, base=None):
+def build_env(i, base=None, shield_path=None, startup_ip=None):
     """Child environment: process-level TZ and proxy variables for this window only (other windows / the shell are untouched)."""
     env = dict(os.environ if base is None else base)
-    for k in PROXY_VARS + ('TZ',):
+    for k in PROXY_VARS + ('TZ', 'CLAUDE_MULTI_PROXY_URL', 'CLAUDE_MULTI_STARTUP_IP', 'CLAUDE_MULTI_EXIT_POLICY', 'CLAUDE_MULTI_MONITOR_INTERVAL_MS', 'CLAUDE_MULTI_USER_DATA_DIR'):
         env.pop(k, None)
     if i.get('proxy'):
         for k in PROXY_VARS:
@@ -485,7 +786,20 @@ def build_env(i, base=None):
         skip = 'localhost,127.0.0.1,::1'               # keep the local cc-switch gateway (127.0.0.1:15721) reachable
         for k in ('NO_PROXY', 'no_proxy'):
             env[k] = (env[k] + ',' + skip) if env.get(k) else skip
-    if i.get('timezone'):
+        env['CLAUDE_MULTI_PROXY_URL'] = i['proxy']
+        resolved_startup_ip = startup_ip or i.get('_verifiedIp') or ''
+        if resolved_startup_ip:
+            env['CLAUDE_MULTI_STARTUP_IP'] = str(resolved_startup_ip)
+        env['CLAUDE_MULTI_EXIT_POLICY'] = str(i.get('proxyExitPolicy') or ('block' if resolved_startup_ip else 'warn'))
+        env['CLAUDE_MULTI_MONITOR_INTERVAL_MS'] = str(i.get('monitorIntervalMs') or 300000)
+        if not is_primary(i):
+            env['CLAUDE_MULTI_USER_DATA_DIR'] = str(data_dir(i))
+    if shield_path:
+        req_flag = f'--require "{shield_path}"'
+        existing_node_opts = env.get('NODE_OPTIONS', '').strip()
+        if req_flag not in existing_node_opts:
+            env['NODE_OPTIONS'] = f'{existing_node_opts} {req_flag}'.strip()
+    if i.get('timezone') and i.get('timezone') != 'auto':
         env['TZ'] = i['timezone']
     return env
 
@@ -497,6 +811,7 @@ def build_args(i, url=None):
         args.append(f'--lang={lang_for(i)}')
     args.append('--force-webrtc-ip-handling-policy')
     args.append('--webrtc-ip-handling-policy=disable_non_proxied_udp')      # Chromium WebRTC otherwise uses raw UDP and bypasses the proxy
+    args.append('--enforce-webrtc-ip-permission-check')
     args.append('--use-mock-keychain')
     args.append('--password-store=basic')
     if i.get('proxy'):
@@ -508,6 +823,9 @@ def build_args(i, url=None):
         host = u.hostname or ''
         port_str = f':{u.port}' if u.port else ''
         args.append(f'--proxy-server={scheme}://{host}{port_str}')
+        args.append('--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost , EXCLUDE ::1')
+        args.append('--disable-quic')
+        args.append('--dns-prefetch-disable')
     if url:
         if not re.fullmatch(r'claude(-desktop)?://\S+', url):
             raise ClaudeMultiError('refusing non-claude:// URL')
@@ -531,7 +849,11 @@ def provision(i, out=print, build=True, force=False, strict=False):
     def warn(m): res['warnings'].append(m); out('warning: ' + m)
     eff = store_root(i); eff.mkdir(parents=True, exist_ok=True)
     if not is_primary(i):
-        data_dir(i).mkdir(parents=True, exist_ok=True)
+        udd = data_dir(i)
+        udd.mkdir(parents=True, exist_ok=True)
+        assert_profile_data_identity(udd, i['id'])
+        ensure_profile_preferences(udd, lang=lang_for(i))
+        ensure_shield_script(udd)
     if is_official(i) and not is_primary(i):               # pure 1P: never see a 3P / cc-switch profile
         for lib in (data_dir(i) / 'configLibrary', data_dir(i).parent / 'Claude-3p' / 'configLibrary'):
             if lib.is_symlink() or lib.is_file():
@@ -605,11 +927,24 @@ def launch(i, url=None, out=print):
             out(f"[WARN] Claude.app updated ({clone_v} -> {src_v}). Cloned instance '{i['id']}' is outdated.")
             out(f"       Run 'claude-multi init --force' or rebuild via GUI to update.")
     provision(i, out=out, build=True, strict=True)
+    shield_path = None
+    startup_ip = None
+    if not is_primary(i):
+        udd = data_dir(i)
+        assert_profile_data_identity(udd, i['id'])
+        if i.get('proxy'):
+            geo = verify_proxy_geo_consensus(i, user_data_dir=udd)
+            startup_ip = geo.get('verifiedIp')
+        ensure_profile_preferences(udd, lang=lang_for(i))
+        shield_path = ensure_shield_script(udd)
+    elif i.get('proxy'):
+        geo = verify_proxy_geo_consensus(i, user_data_dir=store_root(i))
+        startup_ip = geo.get('verifiedIp')
     exe = clone_binary(official_app() if is_primary(i) else ensure_clone(i, out=out))
     args = build_args(i, url)
     log_line(f"launch {i['id']}: {exe} {' '.join(args)}")
     try:
-        p = subprocess.Popen([str(exe)] + args, env=build_env(i), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        p = subprocess.Popen([str(exe)] + args, env=build_env(i, shield_path=shield_path, startup_ip=startup_ip), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError as e:
         raise ClaudeMultiError(f"cannot start {exe}: {e.strerror or e}") from None
     time.sleep(1.5)
@@ -643,7 +978,7 @@ def restart(i, out=print):
 
 
 # ------------------------------------------------------------------ egress check (Windows `check` / Test-InstancePurity)
-def http_get(url, proxy=None, timeout=8):
+def http_get(url, proxy=None, timeout=6):
     """GET through the instance proxy (stdlib only). Socks proxies are not supported by urllib."""
     if proxy and proxy.startswith('socks'):
         raise ClaudeMultiError('socks proxies cannot be checked with the standard library - use an http(s) proxy URL or check manually')
@@ -651,6 +986,147 @@ def http_get(url, proxy=None, timeout=8):
     req = urllib.request.Request(url, headers={'User-Agent': 'claude-multi-check'})
     with urllib.request.build_opener(h).open(req, timeout=timeout) as r:
         return r.read(65536).decode('utf-8', 'replace')
+
+
+def _parse_geo_source_ipwho(raw):
+    data = json.loads(raw)
+    if not isinstance(data, dict) or data.get('success') is False:
+        return None
+    ip = str(data.get('ip') or '').strip()
+    cc = str(data.get('country_code') or data.get('countryCode') or '').strip().upper()
+    tz_raw = data.get('timezone')
+    if isinstance(tz_raw, dict):
+        tz = str(tz_raw.get('id') or '').strip()
+    else:
+        tz = str(tz_raw or '').strip()
+    if not ip or len(cc) != 2:
+        return None
+    return {'ip': ip, 'countryCode': cc, 'timezone': tz, 'source': 'ipwho.is'}
+
+
+def _parse_geo_source_ipapi(raw):
+    data = json.loads(raw)
+    if not isinstance(data, dict) or data.get('error'):
+        return None
+    ip = str(data.get('ip') or '').strip()
+    cc = str(data.get('country_code') or data.get('country') or '').strip().upper()
+    tz = str(data.get('timezone') or '').strip()
+    if not ip or len(cc) != 2:
+        return None
+    return {'ip': ip, 'countryCode': cc, 'timezone': tz, 'source': 'ipapi.co'}
+
+
+def verify_proxy_geo_consensus(i, user_data_dir=None, fetch=None):
+    """Query dual GeoIP endpoints through the configured proxy, align timezone/lang, and persist .proxy-identity.json."""
+    fetch = fetch or http_get
+    proxy = i.get('proxy')
+    iid = i.get('id', 'default')
+    policy = str(i.get('proxyExitPolicy') or 'warn').lower()
+    udd = Path(user_data_dir) if user_data_dir is not None else (store_root(i) if is_primary(i) else data_dir(i))
+    _reject_symlink(udd)
+    udd.mkdir(parents=True, exist_ok=True)
+
+    s1 = None
+    s2 = None
+    try:
+        s1 = _parse_geo_source_ipwho(fetch('https://ipwho.is/', proxy))
+    except Exception:
+        s1 = None
+    try:
+        s2 = _parse_geo_source_ipapi(fetch('https://ipapi.co/json/', proxy))
+    except Exception:
+        s2 = None
+
+    if s1 and s2:
+        if s1['countryCode'] != s2['countryCode'] or s1['ip'] != s2['ip']:
+            geo_confidence = 'conflict'
+        else:
+            geo_confidence = 'high'
+        verified_ip = s1['ip']
+        country_code = s1['countryCode']
+        detected_tz = s1['timezone'] or s2['timezone']
+    elif s1 or s2:
+        chosen = s1 or s2
+        geo_confidence = 'single'
+        verified_ip = chosen['ip']
+        country_code = chosen['countryCode']
+        detected_tz = chosen['timezone']
+    else:
+        geo_confidence = 'unreachable'
+        verified_ip = None
+        country_code = None
+        detected_tz = None
+
+    net_defaults = COUNTRY_NETWORK_MAP.get(country_code, {}) if country_code else {}
+    explicit_tz = i.get('timezone')
+    if explicit_tz and explicit_tz != 'auto':
+        resolved_tz = explicit_tz
+    else:
+        resolved_tz = detected_tz or net_defaults.get('timezone') or 'UTC'
+
+    explicit_lang = i.get('lang')
+    if explicit_lang and explicit_lang != 'auto':
+        resolved_lang = explicit_lang
+    else:
+        resolved_lang = net_defaults.get('lang') or lang_for({'timezone': resolved_tz}) or 'en-US'
+
+    accept_lang = net_defaults.get('accept_language') or f'{resolved_lang},en;q=0.9'
+
+    ident_path = udd / '.proxy-identity.json'
+    _reject_symlink(ident_path)
+    current_proxy_scope = mask_proxy(proxy)
+    prev_ip = None
+    if ident_path.exists():
+        try:
+            prev = json.loads(ident_path.read_text(encoding='utf-8-sig'))
+            if isinstance(prev, dict) and prev.get('instanceId') in (None, iid) and prev.get('proxyScope') in (None, current_proxy_scope):
+                prev_ip = prev.get('verifiedIp')
+        except (OSError, ValueError):
+            prev_ip = None
+
+    ip_drifted = bool(prev_ip and verified_ip and prev_ip != verified_ip)
+
+    if policy == 'block':
+        if geo_confidence == 'unreachable':
+            raise ClaudeMultiError(
+                f"proxy exit verification failed for '{iid}': both GeoIP sources unreachable under strict block policy"
+            )
+        if geo_confidence == 'conflict':
+            raise ClaudeMultiError(
+                f"proxy GeoIP consensus conflict for '{iid}': "
+                f"{s1['ip']}/{s1['countryCode']} vs {s2['ip']}/{s2['countryCode']} (proxyExitPolicy=block)"
+            )
+        if ip_drifted:
+            raise ClaudeMultiError(
+                f"proxy exit IP drift detected for '{iid}': previous verifiedIp '{prev_ip}' != current '{verified_ip}' "
+                "(proxyExitPolicy=block)"
+            )
+
+    record = {
+        'contractVersion': 1,
+        'instanceId': iid,
+        'proxyScope': mask_proxy(proxy),
+        'verifiedIp': verified_ip,
+        'previousVerifiedIp': prev_ip,
+        'ipDrifted': ip_drifted,
+        'countryCode': country_code,
+        'timezone': resolved_tz,
+        'lang': resolved_lang,
+        'acceptLanguage': accept_lang,
+        'geoConfidence': geo_confidence,
+        'verifiedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+    }
+
+    if verified_ip:
+        _atomic_write_json(ident_path, record)
+        i['_verifiedIp'] = verified_ip
+        if not explicit_tz or explicit_tz == 'auto':
+            i['timezone'] = resolved_tz
+        if not explicit_lang or explicit_lang == 'auto':
+            i['lang'] = resolved_lang
+
+    return record
+
 
 def check_instance(i, fetch=None):
     fetch = fetch or http_get; proxy = i.get('proxy'); expect = i.get('timezone')

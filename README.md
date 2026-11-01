@@ -22,6 +22,11 @@ Every window has its own data, its own **recoloured icon** (desktop, taskbar, sy
 * **`claude://` links** open in the window you used last (or a fixed one).
 * **Same session in two windows?** You get a Windows notification before the two transcripts drift apart.
 * **Update-proof:** nothing is patched or copied on Windows; the install path is resolved from the Store package at every launch.
+* **Prism-grade anti-correlation & network isolation:**
+  * **Dual-source GeoIP consensus & auto-alignment:** Probes `ipwho.is` and `ipapi.co` through the instance proxy before launch, automatically aligns `TZ`, `--lang`, and `Accept-Language` (`COUNTRY_NETWORK_MAP`) to the verified exit country, persists `.proxy-identity.json`, and supports strict `proxyExitPolicy: "block"` to abort launch on exit IP drift or GeoIP conflict.
+  * **Runtime proxy drift quarantine (`shield.cjs`):** Injects a Node.js network circuit breaker via `NODE_OPTIONS` that periodically re-verifies the proxy exit IP (`CLAUDE_MULTI_STARTUP_IP`) and immediately quarantines outbound `http`, `https`, and `fetch` requests if the proxy drops or drifts mid-session.
+  * **Chromium DNS / QUIC / WebRTC hardening:** Passes `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost , EXCLUDE ::1"`, `--disable-quic`, `--dns-prefetch-disable`, and `--enforce-webrtc-ip-permission-check`, and pre-writes `Default/Preferences` (`webrtc.ip_handling_policy = "disable_non_proxied_udp"`) while cleaning stale `DevToolsActivePort` files.
+  * **Profile identity anchor (`.profile-identity.json`):** Locks each `user-data-dir` to its owning `instanceId` and rejects symbolic links to prevent accidental cross-account profile contamination.
 
 ## Windows - quick start
 

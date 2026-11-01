@@ -106,6 +106,15 @@ class TestCore(unittest.TestCase):
         # Valid claude:// URL must be accepted
         args = cm.build_args(inst, url='claude://open?token=abc')
         self.assertIn('claude://open?token=abc', args)
+        self.assertIn('--enforce-webrtc-ip-permission-check', args)
+
+    def test_country_network_map_alignment(self):
+        """COUNTRY_NETWORK_MAP must map exit countries to IANA timezone, lang, and Accept-Language."""
+        self.assertEqual(cm.COUNTRY_NETWORK_MAP['JP']['timezone'], 'Asia/Tokyo')
+        self.assertEqual(cm.COUNTRY_NETWORK_MAP['JP']['lang'], 'ja-JP')
+        self.assertEqual(cm.COUNTRY_NETWORK_MAP['SG']['timezone'], 'Asia/Singapore')
+        self.assertEqual(cm.COUNTRY_NETWORK_MAP['US']['lang'], 'en-US')
+        self.assertEqual(cm.validate_timezone('auto'), 'auto')
 
     def test_log_line_creates_directory_and_masks(self):
         """log_line must create ~/.claude-multi/logs and write masked log entries."""

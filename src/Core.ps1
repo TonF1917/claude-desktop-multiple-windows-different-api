@@ -19,6 +19,410 @@ if (-not ('ShellProp' -as [type])) { Add-Type -TypeDefinition (Get-Content (Join
 
 # ---------------------------------------------------------------- config / state
 function Write-Utf8($path, $text) { [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding $false)) }
+
+$script:CountryNetworkMap = @{
+  'US' = @{ timezone = 'America/New_York';   lang = 'en-US'; acceptLanguage = 'en-US,en;q=0.9' }
+  'CA' = @{ timezone = 'America/Toronto';    lang = 'en-CA'; acceptLanguage = 'en-CA,en;q=0.9' }
+  'GB' = @{ timezone = 'Europe/London';      lang = 'en-GB'; acceptLanguage = 'en-GB,en;q=0.9' }
+  'SG' = @{ timezone = 'Asia/Singapore';     lang = 'en-SG'; acceptLanguage = 'en-SG,en;q=0.9' }
+  'KR' = @{ timezone = 'Asia/Seoul';         lang = 'ko-KR'; acceptLanguage = 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'JP' = @{ timezone = 'Asia/Tokyo';         lang = 'ja-JP'; acceptLanguage = 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'DE' = @{ timezone = 'Europe/Berlin';      lang = 'de-DE'; acceptLanguage = 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'FR' = @{ timezone = 'Europe/Paris';       lang = 'fr-FR'; acceptLanguage = 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'NL' = @{ timezone = 'Europe/Amsterdam';   lang = 'nl-NL'; acceptLanguage = 'nl-NL,nl;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'AU' = @{ timezone = 'Australia/Sydney';   lang = 'en-AU'; acceptLanguage = 'en-AU,en;q=0.9' }
+  'HK' = @{ timezone = 'Asia/Hong_Kong';     lang = 'zh-HK'; acceptLanguage = 'zh-HK,zh;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'TW' = @{ timezone = 'Asia/Taipei';        lang = 'zh-TW'; acceptLanguage = 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'IN' = @{ timezone = 'Asia/Kolkata';       lang = 'en-IN'; acceptLanguage = 'en-IN,en;q=0.9' }
+  'BR' = @{ timezone = 'America/Sao_Paulo';  lang = 'pt-BR'; acceptLanguage = 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'ID' = @{ timezone = 'Asia/Jakarta';       lang = 'id-ID'; acceptLanguage = 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'MX' = @{ timezone = 'America/Mexico_City';lang = 'es-MX'; acceptLanguage = 'es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'ES' = @{ timezone = 'Europe/Madrid';      lang = 'es-ES'; acceptLanguage = 'es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'RU' = @{ timezone = 'Europe/Moscow';      lang = 'ru-RU'; acceptLanguage = 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7' }
+  'AE' = @{ timezone = 'Asia/Dubai';         lang = 'en-AE'; acceptLanguage = 'en-AE,en;q=0.9' }
+  'NZ' = @{ timezone = 'Pacific/Auckland';   lang = 'en-NZ'; acceptLanguage = 'en-NZ,en;q=0.9' }
+}
+
+function Assert-NotSymlink([string]$path) {
+  if (-not $path) { return }
+  if (Test-Path -LiteralPath $path) {
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      throw "Refusing symlink or reparse point target at '$path'."
+    }
+  }
+}
+
+function Write-Utf8Atomic([string]$path, [string]$content) {
+  Assert-NotSymlink $path
+  $parent = Split-Path -Parent $path
+  if ($parent) {
+    Assert-NotSymlink $parent
+    if (-not (Test-Path -LiteralPath $parent)) {
+      New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+  }
+  $tmp = "$path.tmp.$PID"
+  Assert-NotSymlink $tmp
+  Write-Utf8 $tmp $content
+  Move-Item -LiteralPath $tmp -Destination $path -Force
+}
+
+function Assert-ProfileDataIdentity([string]$userDataDir, [string]$instanceId) {
+  Assert-NotSymlink $userDataDir
+  if (-not (Test-Path -LiteralPath $userDataDir)) {
+    New-Item -ItemType Directory -Path $userDataDir -Force | Out-Null
+  }
+  $identPath = Join-Path $userDataDir '.profile-identity.json'
+  Assert-NotSymlink $identPath
+  if (Test-Path -LiteralPath $identPath) {
+    $existing = Get-Content -LiteralPath $identPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $existingId = if ($existing -and $existing.PSObject.Properties['instanceId']) { [string]$existing.instanceId } else { '' }
+    if ($existingId -ne $instanceId) {
+      throw "Profile identity mismatch in '$userDataDir': expected instanceId '$instanceId', found '$existingId'. Refusing to launch to prevent cross-account profile contamination."
+    }
+    return $existing
+  }
+  $payload = [ordered]@{
+    contractVersion = 1
+    instanceId      = $instanceId
+    createdAt       = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+  }
+  Write-Utf8Atomic $identPath (($payload | ConvertTo-Json -Depth 4) + "`n")
+  return $payload
+}
+
+function Ensure-ProfilePreferences([string]$userDataDir, [string]$lang) {
+  Assert-NotSymlink $userDataDir
+  if (-not (Test-Path -LiteralPath $userDataDir)) {
+    New-Item -ItemType Directory -Path $userDataDir -Force | Out-Null
+  }
+  $devtoolsPort = Join-Path $userDataDir 'DevToolsActivePort'
+  Assert-NotSymlink $devtoolsPort
+  if (Test-Path -LiteralPath $devtoolsPort) {
+    Remove-Item -LiteralPath $devtoolsPort -Force -ErrorAction SilentlyContinue
+  }
+  $defaultDir = Join-Path $userDataDir 'Default'
+  Assert-NotSymlink $defaultDir
+  if (-not (Test-Path -LiteralPath $defaultDir)) {
+    New-Item -ItemType Directory -Path $defaultDir -Force | Out-Null
+  }
+  $prefsPath = Join-Path $defaultDir 'Preferences'
+  Assert-NotSymlink $prefsPath
+
+  $prefs = [pscustomobject]@{}
+  if (Test-Path -LiteralPath $prefsPath) {
+    try {
+      $loaded = Get-Content -LiteralPath $prefsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($loaded) { $prefs = $loaded }
+    } catch {
+      $prefs = [pscustomobject]@{}
+    }
+  }
+  if (-not $prefs.PSObject.Properties['webrtc'] -or -not $prefs.webrtc) {
+    Set-Prop $prefs 'webrtc' ([pscustomobject]@{})
+  }
+  Set-Prop $prefs.webrtc 'ip_handling_policy' 'disable_non_proxied_udp'
+  Set-Prop $prefs.webrtc 'multiple_routes_enabled' $false
+  Set-Prop $prefs.webrtc 'nonproxied_udp_enabled' $false
+
+  if ($lang) {
+    if (-not $prefs.PSObject.Properties['intl'] -or -not $prefs.intl) {
+      Set-Prop $prefs 'intl' ([pscustomobject]@{})
+    }
+    Set-Prop $prefs.intl 'accept_languages' $lang
+  }
+  Write-Utf8Atomic $prefsPath (($prefs | ConvertTo-Json -Depth 10) + "`n")
+  return $prefs
+}
+
+function Invoke-ProxyGeoQuery([string]$url, [string]$proxyUrl) {
+  $raw = $null
+  if ($proxyUrl) {
+    try { $raw = (& curl.exe -x $proxyUrl -s --max-time 6 $url 2>$null) -join "`n" } catch {}
+  }
+  if (-not $raw) {
+    try {
+      $irm = @{ Uri = $url; TimeoutSec = 6; ErrorAction = 'Stop' }
+      if ($proxyUrl -and $proxyUrl -notmatch '^socks') { $irm['Proxy'] = $proxyUrl }
+      return (Invoke-RestMethod @irm)
+    } catch { return $null }
+  }
+  try { return ($raw | ConvertFrom-Json) } catch { return $null }
+}
+
+function Test-ProxyGeoConsensus($i, [string]$userDataDir) {
+  Assert-NotSymlink $userDataDir
+  if (-not (Test-Path -LiteralPath $userDataDir)) {
+    New-Item -ItemType Directory -Path $userDataDir -Force | Out-Null
+  }
+  $proxy = [string]$i.proxy
+  $iid = [string]$i.id
+  $policy = if ($i.PSObject.Properties['proxyExitPolicy'] -and $i.proxyExitPolicy) { ([string]$i.proxyExitPolicy).ToLower() } else { 'warn' }
+
+  $s1 = $null; $s2 = $null
+  $d1 = Invoke-ProxyGeoQuery 'https://ipwho.is/' $proxy
+  if ($d1 -and ($d1.PSObject.Properties['success'] -eq $null -or $d1.success -ne $false)) {
+    $ip1 = [string]$d1.ip
+    $cc1 = ([string]($(if ($d1.PSObject.Properties['country_code'] -and $d1.country_code) { $d1.country_code } else { $d1.countryCode }))).Trim().ToUpper()
+    $tz1 = if ($d1.timezone -and $d1.timezone.PSObject.Properties['id']) { [string]$d1.timezone.id } else { [string]$d1.timezone }
+    if ($ip1 -and $cc1.Length -eq 2) {
+      $s1 = @{ ip = $ip1; countryCode = $cc1; timezone = $tz1 }
+    }
+  }
+  $d2 = Invoke-ProxyGeoQuery 'https://ipapi.co/json/' $proxy
+  if ($d2 -and (-not $d2.error)) {
+    $ip2 = [string]$d2.ip
+    $cc2 = ([string]($(if ($d2.PSObject.Properties['country_code'] -and $d2.country_code) { $d2.country_code } else { $d2.country }))).Trim().ToUpper()
+    $tz2 = [string]$d2.timezone
+    if ($ip2 -and $cc2.Length -eq 2) {
+      $s2 = @{ ip = $ip2; countryCode = $cc2; timezone = $tz2 }
+    }
+  }
+
+  $geoConfidence = 'unreachable'
+  $verifiedIp = $null
+  $countryCode = $null
+  $detectedTz = $null
+
+  if ($s1 -and $s2) {
+    if ($s1.countryCode -ne $s2.countryCode -or $s1.ip -ne $s2.ip) {
+      $geoConfidence = 'conflict'
+    } else {
+      $geoConfidence = 'high'
+    }
+    $verifiedIp = $s1.ip
+    $countryCode = $s1.countryCode
+    $detectedTz = if ($s1.timezone) { $s1.timezone } else { $s2.timezone }
+  } elseif ($s1 -or $s2) {
+    $chosen = if ($s1) { $s1 } else { $s2 }
+    $geoConfidence = 'single'
+    $verifiedIp = $chosen.ip
+    $countryCode = $chosen.countryCode
+    $detectedTz = $chosen.timezone
+  }
+
+  $netDefaults = if ($countryCode -and $script:CountryNetworkMap.ContainsKey($countryCode)) { $script:CountryNetworkMap[$countryCode] } else { @{} }
+  $explicitTz = if ($i.PSObject.Properties['timezone'] -and $i.timezone) { [string]$i.timezone } else { '' }
+  $resolvedTz = if ($explicitTz -and $explicitTz -ne 'auto') { $explicitTz } elseif ($detectedTz) { $detectedTz } elseif ($netDefaults.timezone) { $netDefaults.timezone } else { 'UTC' }
+
+  $explicitLang = if ($i.PSObject.Properties['lang'] -and $i.lang) { [string]$i.lang } else { '' }
+  $resolvedLang = if ($explicitLang -and $explicitLang -ne 'auto') { $explicitLang } elseif ($netDefaults.lang) { $netDefaults.lang } else { 'en-US' }
+  $acceptLang = if ($netDefaults.acceptLanguage) { $netDefaults.acceptLanguage } else { "$resolvedLang,en;q=0.9" }
+
+  $identPath = Join-Path $userDataDir '.proxy-identity.json'
+  Assert-NotSymlink $identPath
+  $proxyShown = $proxy -replace '(://)[^/\s]*@', '$1***@'
+  $prevIp = $null
+  if (Test-Path -LiteralPath $identPath) {
+    try {
+      $prev = Get-Content -LiteralPath $identPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      $sameInst = (-not $prev.PSObject.Properties['instanceId']) -or ($prev.instanceId -eq $iid)
+      $sameScope = (-not $prev.PSObject.Properties['proxyScope']) -or (-not $prev.proxyScope) -or ($prev.proxyScope -eq $proxyShown)
+      if ($prev -and $sameInst -and $sameScope) {
+        $prevIp = [string]$prev.verifiedIp
+      }
+    } catch {}
+  }
+
+  $ipDrifted = [bool]($prevIp -and $verifiedIp -and ($prevIp -ne $verifiedIp))
+
+  if ($policy -eq 'block') {
+    if ($geoConfidence -eq 'unreachable') {
+      throw "Proxy exit verification failed for '$iid': both GeoIP sources unreachable under strict block policy."
+    }
+    if ($geoConfidence -eq 'conflict') {
+      throw "Proxy GeoIP consensus conflict for '$iid': $($s1.ip)/$($s1.countryCode) vs $($s2.ip)/$($s2.countryCode) (proxyExitPolicy=block)."
+    }
+    if ($ipDrifted) {
+      throw "Proxy exit IP drift detected for '$iid': previous verifiedIp '$prevIp' != current '$verifiedIp' (proxyExitPolicy=block)."
+    }
+  }
+
+  $record = [ordered]@{
+    contractVersion    = 1
+    instanceId         = $iid
+    proxyScope         = $proxyShown
+    verifiedIp         = $verifiedIp
+    previousVerifiedIp = $prevIp
+    ipDrifted          = $ipDrifted
+    countryCode        = $countryCode
+    timezone           = $resolvedTz
+    lang               = $resolvedLang
+    acceptLanguage     = $acceptLang
+    geoConfidence      = $geoConfidence
+    verifiedAt         = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+  }
+
+  if ($verifiedIp) {
+    Write-Utf8Atomic $identPath (($record | ConvertTo-Json -Depth 4) + "`n")
+  }
+  return [pscustomobject]$record
+}
+
+function Write-ShieldScript([string]$userDataDir) {
+  Assert-NotSymlink $userDataDir
+  if (-not (Test-Path -LiteralPath $userDataDir)) {
+    New-Item -ItemType Directory -Path $userDataDir -Force | Out-Null
+  }
+  $shieldPath = Join-Path $userDataDir 'shield.cjs'
+  $shieldCode = @'
+'use strict';
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const { execFile } = require('child_process');
+
+const PROXY_URL = process.env.CLAUDE_MULTI_PROXY_URL || '';
+const STARTUP_IP = (process.env.CLAUDE_MULTI_STARTUP_IP || '').trim();
+const EXIT_POLICY = (process.env.CLAUDE_MULTI_EXIT_POLICY || (STARTUP_IP ? 'block' : 'warn')).toLowerCase();
+const MONITOR_INTERVAL_MS = Math.max(5000, parseInt(process.env.CLAUDE_MULTI_MONITOR_INTERVAL_MS || '300000', 10) || 300000);
+const USER_DATA_DIR = process.env.CLAUDE_MULTI_USER_DATA_DIR || '';
+
+let _networkQuarantined = false;
+let _quarantineReason = '';
+let _consecutiveFailures = 0;
+
+function isLocalHost(host) {
+  if (!host) return false;
+  const h = String(host).toLowerCase().replace(/^\[|\]$/g, '').split(':')[0];
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+}
+
+function extractTargetHost(input, options) {
+  try {
+    if (typeof input === 'string' || input instanceof URL) {
+      const u = new URL(String(input));
+      return u.hostname;
+    }
+    if (input && typeof input === 'object') {
+      return input.hostname || input.host || (options && (options.hostname || options.host)) || '';
+    }
+  } catch (_) {}
+  if (options && typeof options === 'object') {
+    return options.hostname || options.host || '';
+  }
+  return '';
+}
+
+function writeQuarantineLog(reason) {
+  if (!USER_DATA_DIR) return;
+  try {
+    if (!fs.existsSync(USER_DATA_DIR) || fs.lstatSync(USER_DATA_DIR).isSymbolicLink()) return;
+    const logPath = path.join(USER_DATA_DIR, '.proxy-quarantine.log');
+    if (fs.existsSync(logPath) && fs.lstatSync(logPath).isSymbolicLink()) return;
+    const line = `${new Date().toISOString()} [QUARANTINE] policy=${EXIT_POLICY} startupIp=${STARTUP_IP} reason=${reason}\n`;
+    fs.appendFileSync(logPath, line, { encoding: 'utf8', mode: 0o600 });
+  } catch (_) {}
+}
+
+function tripQuarantine(reason) {
+  _quarantineReason = String(reason || 'proxy exit drift detected');
+  writeQuarantineLog(_quarantineReason);
+  if (EXIT_POLICY === 'block') {
+    _networkQuarantined = true;
+  }
+}
+
+function assertNotQuarantined(host) {
+  if (_networkQuarantined && !isLocalHost(host)) {
+    throw new Error(`[Claude-Multi Shield] Network quarantined due to proxy exit drift: ${_quarantineReason}`);
+  }
+}
+
+const origHttpRequest = http.request;
+http.request = function(input, options, cb) {
+  assertNotQuarantined(extractTargetHost(input, options));
+  return origHttpRequest.apply(this, arguments);
+};
+
+const origHttpGet = http.get;
+http.get = function(input, options, cb) {
+  assertNotQuarantined(extractTargetHost(input, options));
+  return origHttpGet.apply(this, arguments);
+};
+
+const origHttpsRequest = https.request;
+https.request = function(input, options, cb) {
+  assertNotQuarantined(extractTargetHost(input, options));
+  return origHttpsRequest.apply(this, arguments);
+};
+
+const origHttpsGet = https.get;
+https.get = function(input, options, cb) {
+  assertNotQuarantined(extractTargetHost(input, options));
+  return origHttpsGet.apply(this, arguments);
+};
+
+if (typeof globalThis.fetch === 'function') {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = function(input, init) {
+    try {
+      const urlStr = (typeof input === 'string' || input instanceof URL) ? String(input) : (input && input.url ? input.url : '');
+      assertNotQuarantined(extractTargetHost(urlStr, init));
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return origFetch.apply(this, arguments);
+  };
+}
+
+function probeExitIpOnce(url, cb) {
+  const curlBin = process.platform === 'win32' ? 'curl.exe' : 'curl';
+  execFile(curlBin, ['-x', PROXY_URL, '-s', '--max-time', '6', url], { timeout: 7000, maxBuffer: 65536 }, (err, stdout) => {
+    if (err || !stdout) return cb(null);
+    try {
+      const data = JSON.parse(stdout);
+      const ip = String(data.ip || '').trim();
+      return cb(ip || null);
+    } catch (_) {
+      return cb(null);
+    }
+  });
+}
+
+function verifyRuntimeExitIp() {
+  probeExitIpOnce('https://ipwho.is/', (ip1) => {
+    if (ip1) {
+      _consecutiveFailures = 0;
+      if (ip1 !== STARTUP_IP) {
+        tripQuarantine(`exit IP drifted from ${STARTUP_IP} to ${ip1}`);
+      }
+      return;
+    }
+    probeExitIpOnce('https://api.ipify.org?format=json', (ip2) => {
+      if (ip2) {
+        _consecutiveFailures = 0;
+        if (ip2 !== STARTUP_IP) {
+          tripQuarantine(`exit IP drifted from ${STARTUP_IP} to ${ip2}`);
+        }
+        return;
+      }
+      _consecutiveFailures += 1;
+      if (_consecutiveFailures >= 2) {
+        tripQuarantine(`proxy unreachable for ${_consecutiveFailures} consecutive checks`);
+      }
+    });
+  });
+}
+
+if (PROXY_URL && STARTUP_IP) {
+  const timer = setInterval(verifyRuntimeExitIp, MONITOR_INTERVAL_MS);
+  if (timer && typeof timer.unref === 'function') {
+    timer.unref();
+  }
+}
+
+module.exports = {
+  isQuarantined: () => _networkQuarantined,
+  getQuarantineReason: () => _quarantineReason,
+  tripQuarantine,
+};
+'@
+  Write-Utf8Atomic $shieldPath ($shieldCode.Replace("`r`n", "`n") + "`n")
+  return $shieldPath
+}
 function Read-Config {
   $c = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
   if (-not $c.PSObject.Properties['settings']) { $c | Add-Member settings ([pscustomobject]@{}) }
@@ -166,6 +570,12 @@ function Initialize-InstanceEnv($i) {
   }
 
   # Generate colored icon and create/wire shortcuts
+  if (-not ($i.kind -eq 'official' -and $i.id -eq 'official')) {
+    Assert-ProfileDataIdentity $data $i.id | Out-Null
+  }
+  $initLang = if ($i.PSObject.Properties['lang'] -and $i.lang -and $i.lang -ne 'auto') { [string]$i.lang } else { '' }
+  Ensure-ProfilePreferences $data $initLang | Out-Null
+  Write-ShieldScript $data | Out-Null
   Update-Icons @($i) -Force
   if ($i.kind -eq 'official' -and $i.id -eq 'official') {
     foreach ($l in @(Get-OfficialLinks | Where-Object { Test-Path $_ })) { Set-Link $l $i }
@@ -265,14 +675,42 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
   $args_ = @()
   if ($Url) { $args_ += "`"$Url`"" }
   if (-not (Get-Roots $i)) { try { Apply-PendingSettings $i } catch { } }      # settings changed elsewhere while this instance was closed
+  $savedNodeOpts = $env:NODE_OPTIONS
   try {
-    if ($i.timezone) {
-      $env:TZ = $i.timezone
+    if (-not ($i.kind -eq 'official' -and $i.id -eq 'official')) {
+      Assert-ProfileDataIdentity $data $i.id | Out-Null
+    }
+    $shieldPath = Write-ShieldScript $data
+
+    $effectiveTz   = if ($i.PSObject.Properties['timezone'] -and $i.timezone) { [string]$i.timezone } else { '' }
+    $effectiveLang = if ($i.PSObject.Properties['lang'] -and $i.lang -and $i.lang -ne 'auto') { [string]$i.lang } else { '' }
+    $startupIp     = ''
+
+    if ($i.proxy) {
+      $geo = Test-ProxyGeoConsensus $i $data
+      if ($geo) {
+        if ($geo.verifiedIp) { $startupIp = [string]$geo.verifiedIp }
+        if (-not $effectiveTz -or $effectiveTz -eq 'auto') { $effectiveTz = [string]$geo.timezone }
+        if (-not $effectiveLang -or $effectiveLang -eq 'auto') { $effectiveLang = [string]$geo.lang }
+      }
+    }
+
+    Ensure-ProfilePreferences $data $effectiveLang | Out-Null
+
+    if ($effectiveTz -and $effectiveTz -ne 'auto') {
+      $env:TZ = $effectiveTz
     } else {
       [Environment]::SetEnvironmentVariable('TZ', $null, 'Process')
     }
     if ($i.proxy) {
       $env:HTTP_PROXY = $i.proxy; $env:HTTPS_PROXY = $i.proxy; $env:ALL_PROXY = $i.proxy
+      $env:CLAUDE_MULTI_PROXY_URL = $i.proxy
+      if ($startupIp) { $env:CLAUDE_MULTI_STARTUP_IP = $startupIp }
+      $env:CLAUDE_MULTI_EXIT_POLICY = if ($i.PSObject.Properties['proxyExitPolicy'] -and $i.proxyExitPolicy) { [string]$i.proxyExitPolicy } elseif ($startupIp) { 'block' } else { 'warn' }
+      $env:CLAUDE_MULTI_MONITOR_INTERVAL_MS = if ($i.PSObject.Properties['monitorIntervalMs'] -and $i.monitorIntervalMs) { [string]$i.monitorIntervalMs } else { '300000' }
+      $env:CLAUDE_MULTI_USER_DATA_DIR = $data
+      $reqOpt = "--require `"$shieldPath`""
+      $env:NODE_OPTIONS = if ($env:NODE_OPTIONS) { "$($env:NODE_OPTIONS) $reqOpt" } else { $reqOpt }
     } else {
       [Environment]::SetEnvironmentVariable('HTTP_PROXY', $null, 'Process')
       [Environment]::SetEnvironmentVariable('HTTPS_PROXY', $null, 'Process')
@@ -318,20 +756,35 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
     # 2026-10-20: Chromium/Electron 的 WebRTC 默认走裸 UDP，完全绕过 --proxy-server。
     # 强制 WebRTC UDP 策略以阻止真实 IP 泄漏。
     # 同时补 official 分支缺失的 --proxy-server 并去除嵌入的凭据（Chromium 命令行不接受 user:pass）。
-    if ($i.proxy -and -not (($args_ -join ' ') -match '--proxy-server')) {
-      $cleanProxy = $i.proxy -replace '://[^/@\s]+@', '://' -replace '^[^/@\s]+@', ''
-      $args_ += "--proxy-server=`"$cleanProxy`""
+    if ($effectiveLang) {
+      $args_ += "--lang=$effectiveLang"
+    }
+    if ($i.proxy) {
+      if (-not (($args_ -join ' ') -match '--proxy-server')) {
+        $cleanProxy = $i.proxy -replace '://[^/@\s]+@', '://' -replace '^[^/@\s]+@', ''
+        $args_ += "--proxy-server=`"$cleanProxy`""
+      }
+      $args_ += '--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost , EXCLUDE ::1"'
+      $args_ += '--disable-quic'
+      $args_ += '--dns-prefetch-disable'
     }
     $args_ += '--force-webrtc-ip-handling-policy'
     $args_ += '--webrtc-ip-handling-policy=disable_non_proxied_udp'
+    $args_ += '--enforce-webrtc-ip-permission-check'
     if ($Minimized) { [void][ShellProp]::StartMinNoActivate($exe, ($args_ -join ' ')) }
     elseif ($args_.Count) { Start-Process $exe -ArgumentList $args_ } else { Start-Process $exe }
   } finally {
     $env:LOCALAPPDATA = $RealLocal
+    $env:NODE_OPTIONS = $savedNodeOpts
     [Environment]::SetEnvironmentVariable('TZ', $null, 'Process')
     [Environment]::SetEnvironmentVariable('HTTP_PROXY', $null, 'Process')
     [Environment]::SetEnvironmentVariable('HTTPS_PROXY', $null, 'Process')
     [Environment]::SetEnvironmentVariable('ALL_PROXY', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('CLAUDE_MULTI_PROXY_URL', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('CLAUDE_MULTI_STARTUP_IP', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('CLAUDE_MULTI_EXIT_POLICY', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('CLAUDE_MULTI_MONITOR_INTERVAL_MS', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('CLAUDE_MULTI_USER_DATA_DIR', $null, 'Process')
   }
   if (-not $NoAgent) { Start-Agent }
   if ($Show -and -not $Minimized) {       # the user asked for this window: bring it up even if it was sitting minimised

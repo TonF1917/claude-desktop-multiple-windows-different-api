@@ -1066,6 +1066,71 @@ function Ensure-PatchedClaudeRuntime([string]$SourceExe, [string]$ChatFont) {
   return $rtExe
 }
 
+function Write-LaunchAudit($inst, $ok, $detail) {
+  # 启动审计：每次 launch 一行结论。Claude 的失败可以是完全静默的（argv 守卫直接
+  # exit(1)，不写 main.log、不留 Crashpad 报告），没有这条日志就只能靠人肉猜。
+  try {
+    $path = Join-Path $HomeRoot 'launch-audit.log'
+    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $state = if ($ok) { 'OK  ' } else { 'FAIL' }
+    $lines = @("$stamp  $state  $($inst.id)")
+    if (-not $ok -and $detail) { foreach ($ln in ($detail -split "`n")) { $lines += "        $ln" } }
+    Add-Content -Path $path -Value $lines -Encoding utf8
+    $all = @(Get-Content -Path $path -ErrorAction SilentlyContinue)
+    if ($all.Count -gt 400) { $all | Select-Object -Last 300 | Set-Content -Path $path -Encoding utf8 }
+  } catch { }
+}
+
+function Get-LaunchFailureReport($inst, $launchedExe, $pkgExe, $launchArgs) {
+  # 失败取证：用官方 exe 复跑一次（强制独立 --user-data-dir，绝不碰真实实例），
+  # 9 秒内退出就读 stderr，据此区分三类原因：
+  #   被守卫拒绝 / 参数以外的崩溃 / 参数没问题（问题在补丁 exe 或启动通道）。
+  $out = @()
+  $ver = try { (Get-ClaudePackage).Version.ToString() } catch { 'unknown' }
+  $out += "version  : $ver"
+  $out += "exe      : $launchedExe"
+  $out += "args     : $($launchArgs -join ' ')"
+  $verdict = 'unknown'
+  if (Test-Path $pkgExe) {
+    $diagDir = Join-Path $HomeRoot ('.diag-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $diagArgs = @($launchArgs | Where-Object { $_ -notmatch '^--user-data-dir' })
+    $diagArgs = @("--user-data-dir=`"$diagDir`"") + $diagArgs
+    $proc = $null
+    try {
+      $psi = New-Object System.Diagnostics.ProcessStartInfo
+      $psi.FileName = $pkgExe
+      $psi.Arguments = ($diagArgs -join ' ')
+      $psi.UseShellExecute = $false
+      $psi.RedirectStandardError = $true
+      $psi.RedirectStandardOutput = $true
+      $psi.CreateNoWindow = $true
+      $proc = [System.Diagnostics.Process]::Start($psi)
+      $errTask = $proc.StandardError.ReadToEndAsync()
+      $null = $proc.StandardOutput.ReadToEndAsync()
+      if ($proc.WaitForExit(9000)) {
+        $txt = ''
+        try { $txt = $errTask.Result } catch { }
+        $first = ($txt -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 1
+        $code = $proc.ExitCode
+        if ($txt -match 'refusing to start') {
+          $verdict = "ARGV-GUARD 官方 exe 同样被拒（exit $code）：$first"
+        } elseif ($code -ne 0) {
+          $verdict = "CRASH exit=$code，stderr 首行：$first"
+        } elseif ($first) {
+          $verdict = "LEGIT exit=0 未被守卫拒绝（参数合法）；stderr 有非致命输出：$first"
+        } else {
+          $verdict = "LEGIT exit=0 未被守卫拒绝（参数合法），stderr 为空"
+        }
+        Remove-Item $diagDir -Recurse -Force -ErrorAction SilentlyContinue
+      } else {
+        $verdict = "DIAG-ALIVE 参数与官方 exe 均正常（诊断实例 PID $($proc.Id) 仍在运行），故障出在启动通道 / 补丁 exe / 隔离环境"
+      }
+    } catch { $verdict = "DIAG-FAIL 诊断启动失败：$($_.Exception.Message)" }
+  } else { $verdict = "NO-EXE 找不到 $pkgExe" }
+  $out += "verdict  : $verdict"
+  $out -join "`n"
+}
+
 function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [switch]$Show) {
   $pkg = Get-ClaudePackage
   $pkgExe = Join-Path $pkg.InstallLocation 'app\Claude.exe'
@@ -1208,11 +1273,28 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
     [Environment]::SetEnvironmentVariable('CLAUDE_MULTI_USER_DATA_DIR', $null, 'Process')
   }
   if (-not $NoAgent) { Start-Agent }
-  if ($Show -and -not $Minimized) {       # the user asked for this window: bring it up even if it was sitting minimised
-    for ($k = 0; $k -lt 40; $k++) {
+  # 启动自检（2026-11-02）：原实现只在 -Show 时轮询窗口，失败则完全静默 —— 用户侧
+  # 表现就是"双击没反应"，且 Claude 的拒绝启动不留任何日志。现在无条件等进程出现，
+  # 拿不到就取证 + 落审计 + 抛出可读错误。
+  if (-not $Minimized) {
+    $root = $null
+    for ($k = 0; $k -lt 48; $k++) {
       $r = @(Get-Roots $i) | Select-Object -First 1
-      if ($r) { $p = Get-Process -Id $r.ProcessId -ErrorAction SilentlyContinue; if ($p -and $p.MainWindowHandle -ne 0) { [ShellProp]::Restore($p.MainWindowHandle); [void][ShellProp]::Foreground($p.MainWindowHandle); break } }
+      if ($r) { $root = $r; break }
       Start-Sleep -Milliseconds 250
+    }
+    if (-not $root) {
+      $report = Get-LaunchFailureReport $i $exe $pkgExe $args_
+      Write-LaunchAudit $i $false $report
+      throw ("instance '$($i.id)' failed to start. diagnosis written to $HomeRoot\launch-audit.log`n`n$report")
+    }
+    Write-LaunchAudit $i $true ''
+    if ($Show) {       # the user asked for this window: bring it up even if it was sitting minimised
+      for ($k = 0; $k -lt 40; $k++) {
+        $p = Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue
+        if ($p -and $p.MainWindowHandle -ne 0) { [ShellProp]::Restore($p.MainWindowHandle); [void][ShellProp]::Foreground($p.MainWindowHandle); break }
+        Start-Sleep -Milliseconds 250
+      }
     }
   }
 }

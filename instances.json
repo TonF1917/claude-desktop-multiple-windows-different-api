@@ -7,14 +7,14 @@
                           "palette":  "official",
                           "proxy":  "http://127.0.0.1:27894",
                           "timezone":  "America/Toronto",
+                          "proxyExitPolicy":  "block",
                           "isolate":  true
                       },
                       {
                           "id":  "3p",
                           "name":  "Claude 3P",
                           "kind":  "cc-switch",
-                          "palette":  "violet",
-                          "chatFont":  "anthropic-serif"
+                          "palette":  "violet"
                       },
                       {
                           "id":  "official2",
@@ -22,7 +22,8 @@
                           "kind":  "official",
                           "palette":  "perplexity",
                           "proxy":  "http://127.0.0.1:27892",
-                          "timezone":  "America/Los_Angeles"
+                          "timezone":  "America/Los_Angeles",
+                          "proxyExitPolicy":  "block"
                       }
                   ],
     "settings":  {

@@ -238,6 +238,14 @@ function Test-ProxyGeoConsensus($i, [string]$userDataDir) {
     if ($ipDrifted) {
       throw "Proxy exit IP drift detected for '$iid': previous verifiedIp '$prevIp' != current '$verifiedIp' (proxyExitPolicy=block)."
     }
+    # 2026-11-02: 时区与出口地理不一致 = 自相矛盾的 locale 信号（IP 在 A 地、系统时区在 B 地），
+    # 这是风控最容易抓的特征组合。strict 下宁可不起，也不带着矛盾指纹跑。
+    if ($explicitTz -and $explicitTz -ne 'auto' -and $detectedTz -and ($explicitTz -ne $detectedTz)) {
+      $geoStrict = if ($i.PSObject.Properties['geoStrict']) { [bool]$i.geoStrict } else { $true }
+      if ($geoStrict) {
+        throw "Proxy exit geography mismatch for '$iid': configured timezone '$explicitTz' but exit '$verifiedIp' ($countryCode) resolves to '$detectedTz'. Fix instances.json timezone, or set `"geoStrict`": false to downgrade this check."
+      }
+    }
   }
 
   $record = [ordered]@{
@@ -1131,7 +1139,60 @@ function Get-LaunchFailureReport($inst, $launchedExe, $pkgExe, $launchArgs) {
   $out -join "`n"
 }
 
-function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [switch]$Show) {
+# 2026-11-02: Claude 4.4212+ 的 argv 守卫黑名单（app.asar 内 NY 常量，前缀匹配）。
+# 官方每次扩表，我们必然慢一拍 —— 所以这里只做零成本的预防性过滤，
+# 真正的兜底是启动失败后的 Find-BlockedSwitch 探测 + 自动重试。
+$script:ClaudeBlockedSwitches = @(
+  'remote-debugging-port', 'remote-debugging-pipe', 'ignore-certificate-errors',
+  'host-resolver-rules', 'host-rules', 'disable-web-security', 'log-net-log',
+  'net-log-capture-mode', 'ssl-key-log-file', 'renderer-cmd-prefix',
+  'utility-cmd-prefix', 'gpu-launcher', 'zygote-cmd-prefix',
+  'ppapi-plugin-launcher', 'nacl-loader-cmd-prefix', 'browser-subprocess-path'
+)
+
+function Remove-BlockedSwitches($launchArgs) {
+  $kept = @(); $dropped = @()
+  foreach ($a in $launchArgs) {
+    if ($a -match '^--?') {
+      $name = (($a -replace '^--?', '') -split '=')[0].ToLowerInvariant()
+      if ($script:ClaudeBlockedSwitches | Where-Object { $name.StartsWith($_) }) { $dropped += $a; continue }
+    }
+    $kept += $a
+  }
+  [pscustomobject]@{ Args = @($kept); Dropped = @($dropped) }
+}
+
+function Find-BlockedSwitch($pkgExe, $launchArgs) {
+  # 未知元凶探测：逐个注入单一开关，被守卫拒绝即锁定该开关。仅在前缀过滤没兜住
+  # （官方新增了黑名单项）时调用，代价是每个候选一次 3.5s 的探针启动。
+  $cands = @($launchArgs | Where-Object { $_ -match '^--' -and $_ -notmatch '^--user-data-dir' })
+  foreach ($c in $cands) {
+    $probe = ($c -split '=')[0]
+    $dir = Join-Path $HomeRoot ('.probe-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+    try {
+      $psi = New-Object System.Diagnostics.ProcessStartInfo
+      $psi.FileName = $pkgExe
+      $psi.Arguments = "--user-data-dir=`"$dir`" $probe=1 --lang=en"
+      $psi.UseShellExecute = $false
+      $psi.RedirectStandardError = $true
+      $psi.RedirectStandardOutput = $true
+      $psi.CreateNoWindow = $true
+      $p = [System.Diagnostics.Process]::Start($psi)
+      $et = $p.StandardError.ReadToEndAsync()
+      $null = $p.StandardOutput.ReadToEndAsync()
+      if ($p.WaitForExit(3500)) {
+        $txt = ''
+        try { $txt = $et.Result } catch { }
+        if ($txt -match 'refusing to start') { return $c }
+      } else { try { $p.Kill() } catch { } }
+    } catch { } finally {
+      Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+  $null
+}
+
+function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [switch]$Show, [switch]$NoAdaptive) {
   $pkg = Get-ClaudePackage
   $pkgExe = Join-Path $pkg.InstallLocation 'app\Claude.exe'
   $exe = $pkgExe
@@ -1257,6 +1318,13 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
     $args_ += '--force-webrtc-ip-handling-policy'
     $args_ += '--webrtc-ip-handling-policy=disable_non_proxied_udp'
     $args_ += '--enforce-webrtc-ip-permission-check'
+    $filt = Remove-BlockedSwitches $args_
+    if ($filt.Dropped.Count -gt 0) {
+      $args_ = $filt.Args
+      try {
+        Add-Content -Path (Join-Path $HomeRoot 'launch-audit.log') -Encoding utf8 -Value ("{0}  DROP  {1}  blocked=[{2}]" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $i.id, ($filt.Dropped -join ' '))
+      } catch { }
+    }
     if ($Minimized) { [void][ShellProp]::StartMinNoActivate($exe, ($args_ -join ' ')) }
     elseif ($args_.Count) { Start-Process $exe -ArgumentList $args_ } else { Start-Process $exe }
   } finally {
@@ -1286,6 +1354,15 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
     if (-not $root) {
       $report = Get-LaunchFailureReport $i $exe $pkgExe $args_
       Write-LaunchAudit $i $false $report
+      if (-not $NoAdaptive -and $report -match 'ARGV-GUARD') {
+        $culprit = Find-BlockedSwitch $pkgExe $args_
+        if ($culprit) {
+          Write-LaunchAudit $i $false ("auto-adapt: dropping [$culprit] and retrying - add it to `$script:ClaudeBlockedSwitches")
+          Invoke-Launch $i $Url -NoAgent:$NoAgent -Minimized:$Minimized -Show:$Show -NoAdaptive
+          return
+        }
+        Write-LaunchAudit $i $false 'auto-adapt: ARGV-GUARD reproduced but no single argv switch was identified as the culprit'
+      }
       throw ("instance '$($i.id)' failed to start. diagnosis written to $HomeRoot\launch-audit.log`n`n$report")
     }
     Write-LaunchAudit $i $true ''

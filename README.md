@@ -25,7 +25,7 @@ Every window has its own data, its own **recoloured icon** (desktop, taskbar, sy
 * **Prism-grade anti-correlation & network isolation:**
   * **Dual-source GeoIP consensus & auto-alignment:** Probes `ipwho.is` and `ipapi.co` through the instance proxy before launch, automatically aligns `TZ`, `--lang`, and `Accept-Language` (`COUNTRY_NETWORK_MAP`) to the verified exit country, persists `.proxy-identity.json`, and supports strict `proxyExitPolicy: "block"` to abort launch on exit IP drift or GeoIP conflict.
   * **Runtime proxy drift quarantine (`shield.cjs`):** Injects a Node.js network circuit breaker via `NODE_OPTIONS` that periodically re-verifies the proxy exit IP (`CLAUDE_MULTI_STARTUP_IP`) and immediately quarantines outbound `http`, `https`, and `fetch` requests if the proxy drops or drifts mid-session.
-  * **Chromium DNS / QUIC / WebRTC hardening:** Passes `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost , EXCLUDE ::1"`, `--disable-quic`, `--dns-prefetch-disable`, and `--enforce-webrtc-ip-permission-check`, and pre-writes `Default/Preferences` (`webrtc.ip_handling_policy = "disable_non_proxied_udp"`) while cleaning stale `DevToolsActivePort` files.
+  * **Chromium DNS / QUIC / WebRTC hardening:** Passes `--disable-quic`, and pre-writes `Default/Preferences` (`webrtc.ip_handling_policy = "disable_non_proxied_udp"`) while cleaning stale `DevToolsActivePort` files. **Raw WebRTC UDP cannot be blocked from the command line** — `--force-webrtc-ip-handling-policy` and `--dns-prefetch-disable` no longer exist in Chromium 156, the `--webrtc-ip-handling-policy` switch string is absent from `Claude.exe`, and the `Preferences` value is never propagated to the renderer. What actually works is `udp-guard` (a firewall rule blocking the host exe's outbound UDP) — see item 5 under "Multi-Official Account Support".
   * **Profile identity anchor (`.profile-identity.json`):** Locks each `user-data-dir` to its owning `instanceId` and rejects symbolic links to prevent accidental cross-account profile contamination.
 
 ## Windows - quick start
@@ -50,6 +50,7 @@ Then right-click each new Desktop shortcut and choose **Pin to taskbar** (Window
 | `check [-Id <id>]` (alias `test-ip`) | audit instance egress IP, residential/datacenter status, risk score (0-100), Claude region eligibility & timezone alignment |
 | `install [-Force]` | (re)build icons and shortcuts; rewires your existing pinned Claude shortcuts |
 | `launch -Id gem` | start a window |
+| `udp-guard [-Id <id>]` | install/repair the raw-WebRTC-UDP guard (firewall rule blocking the host exe's outbound UDP); **needs elevation**; re-run after an app upgrade |
 | `list`, `providers`, `sync`, `remove -Id gem`, `icons -Force`, `uninstall` | housekeeping |
 
 The manager GUI exposes the same options: a kind selector next to *Add*, click-to-edit **Proxy** (credentials are masked in the grid and the output pane) and **Timezone** (common IANA zones or typed), **Init** / **Check** buttons that run in a background process and stream into an output pane, plus *Stop*.
@@ -102,6 +103,13 @@ In addition to 1 Official + N Third-Party windows, the tool now fully supports *
 4. **Automated Provisioning & Egress Audit (`init` & `check`)**:
    - `.\claude-multi.ps1 init [-Id <id>]`: Provisions the complete environment in one click (creates Data dir, mirrors MCP `claude_desktop_config.json`, junctions `claude-code-sessions`, and generates tinted icons and shortcuts).
    - `.\claude-multi.ps1 check [-Id <id>]`: Audits all instances' egress IP, residential/datacenter status, fraud risk score (0-100), Claude regional support, and timezone alignment.
+5. **Raw UDP Leak Blocking (`udp-guard`)**: `--proxy-server` only proxies TCP, so WebRTC STUN goes straight out of the physical NIC and hands the peer your real public IP. The command line cannot stop it — `--force-webrtc-ip-handling-policy` no longer exists in Chromium 156 (silently ignored), the `--webrtc-ip-handling-policy` switch string is not present in `Claude.exe` (Electron never compiled it in), and `webrtc.ip_handling_policy` written to `Preferences` is not propagated to the renderer. What actually works is a firewall rule that blocks the host exe's outbound UDP:
+
+   ```powershell
+   .\claude-multi.ps1 udp-guard [-Id <id>]   # run from an elevated PowerShell
+   ```
+
+   The rule targets only the Claude host `Claude.exe` (53/UDP is left open so name resolution keeps working) and does not affect other programs on the machine. To verify: after enabling it, a STUN Binding Request to `stun.l.google.com:19302` must time out. **The WindowsApps path embeds the app version, so an app update invalidates the rule — re-run the command after upgrading.** Every launch also checks the rule and writes a `GUARD` line to `~/.claude-multi/launch-audit.log` when the path no longer matches. Set `"settings": { "udpGuard": false }` to turn the automatic check off.
 
 ## Using cc-switch
 

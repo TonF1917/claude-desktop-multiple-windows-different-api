@@ -6,7 +6,7 @@
 .EXAMPLE   .\claude-multi.ps1 launch -Id 3p
 #>
 param(
-  [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'init', 'setup', 'check', 'test-ip', 'purity', 'uninstall', 'icons', 'providers', 'doctor')][string]$Command = 'gui',
+  [Parameter(Position = 0)][ValidateSet('gui', 'install', 'launch', 'restart', 'route', 'agent', 'sync', 'list', 'add', 'remove', 'init', 'setup', 'check', 'test-ip', 'purity', 'uninstall', 'icons', 'providers', 'doctor', 'udp-guard')][string]$Command = 'gui',
   [string]$Id, [string]$Name, [string]$Kind, [string]$Palette = 'violet', [string]$Provider, [string]$Profile, [string]$Url, [string]$Proxy, [string]$Timezone,
   [switch]$Force
 )
@@ -27,6 +27,10 @@ switch ($Command) {
   }
   'install' { Install-All -Force:$Force; "`nDone. Right-click a Desktop shortcut -> 'Pin to taskbar' (Windows does not let scripts pin)." }
   'launch'  { Invoke-Launch (Get-Instance $Id) -Show }
+  # 2026-11-03: WebRTC 的裸 UDP 命令行关不住（详见 Core.ps1 里 Ensure-UdpLeakGuard 的注释），
+  # 真正生效的是按 exe 阻断出站 UDP 的防火墙规则。这条命令用来在提权 shell 里一次性装好，
+  # 以及应用升级后（WindowsApps 路径带版本号，旧规则会失效）重新对齐。
+  'udp-guard' { Invoke-UdpGuard $Id }
   'route'   { Invoke-RouteUrl $Url }
   'restart' {
     if ($Url -match '^claudemulti://restart/([A-Za-z0-9_-]+)$') { $Id = $Matches[1] }

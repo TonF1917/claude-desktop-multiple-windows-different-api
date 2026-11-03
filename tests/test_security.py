@@ -108,17 +108,33 @@ class TestSecurity(unittest.TestCase):
                 cm.store_root = orig_store_root
 
     def test_windows_core_ps1_security_flags(self):
-        """Verify Windows Core.ps1 also contains the WebRTC, DNS/QUIC anti-bypass, and shield.cjs fixes."""
+        """Verify Windows Core.ps1 keeps the working anti-bypass fixes and no longer ships dead switches.
+
+        2026-11-03: --force-webrtc-ip-handling-policy / --dns-prefetch-disable do not exist in
+        Chromium 156, and the --webrtc-ip-handling-policy switch string is absent from Claude.exe,
+        so those args were placebo. The real enforcement is the per-exe outbound-UDP firewall rule.
+        They still appear in the explanatory comment, so assert on the *assignment* form instead.
+        """
         core_ps1_path = Path(__file__).resolve().parent.parent / 'src' / 'Core.ps1'
         content = core_ps1_path.read_text(encoding='utf-8')
-        self.assertIn('--force-webrtc-ip-handling-policy', content)
-        self.assertIn('--webrtc-ip-handling-policy=disable_non_proxied_udp', content)
-        self.assertIn('--enforce-webrtc-ip-permission-check', content)
+        # still enforced
         self.assertIn('--disable-quic', content)
-        self.assertIn('--dns-prefetch-disable', content)
         self.assertIn('--proxy-server=', content)
         self.assertIn('_networkQuarantined', content)
         self.assertIn('CLAUDE_MULTI_STARTUP_IP', content)
+        # WebRTC raw-UDP can only be stopped below the app: firewall rule keyed on the exe path
+        self.assertIn('function Ensure-UdpLeakGuard', content)
+        self.assertIn('function Install-UdpLeakGuard', content)
+        self.assertIn('New-NetFirewallRule', content)
+        self.assertIn("Protocol = 'UDP'", content)
+        self.assertIn('Ensure-UdpLeakGuard $i.id $udpTarget', content)
+        # dead switches must no longer be appended to the command line
+        for dead in ('--force-webrtc-ip-handling-policy',
+                     '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+                     '--enforce-webrtc-ip-permission-check',
+                     '--dns-prefetch-disable'):
+            self.assertNotIn("$args_ += '" + dead, content)
+            self.assertNotIn('$args_ += "' + dead, content)
 
     def test_chromium_anti_bypass_flags_with_proxy(self):
         """Verify Chromium DNS/QUIC/WebRTC anti-bypass CLI flags are appended when proxy is configured."""

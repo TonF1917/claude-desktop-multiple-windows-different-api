@@ -137,6 +137,92 @@ function Ensure-ProfilePreferences([string]$userDataDir, [string]$lang) {
   return $prefs
 }
 
+# ---------------------------------------------------------------- UDP leak guard
+# 2026-11-03: Electron/Chromium 的 WebRTC 走裸 UDP，而 --proxy-server 只代理 TCP ——
+# STUN 会从物理网卡直接打出去，真实公网 IP 随之暴露给对端（实测泄漏值与
+# `curl --noproxy '*'` 得到的本机直连出口完全一致）。命令行层救不回来：
+#   * `--force-webrtc-ip-handling-policy` 在 Chromium 156 里**不存在**，写了静默忽略；
+#   * `--webrtc-ip-handling-policy` 的开关字符串在 Claude.exe 里根本搜不到（Electron 未编译进
+#     该 switch），且即便主进程有，Electron 也不会把它下发给 renderer 的 WebRTC 实现；
+#   * `webPreferences` 里的 webrtc.ip_handling_policy 同理，写进 Preferences 也不生效。
+# 真正稳定生效的只有 Windows 防火墙按 exe 路径阻断出站 UDP：实测加上规则后
+# STUN(3478/19302) 全部超时，撤掉规则立刻恢复泄漏。
+# 放行 53/UDP 是刻意的：Chromium 的异步解析器会自己发 UDP DNS，整段封掉会把名字
+# 解析一起掐死；而 WebRTC 泄露跟 53 无关。Windows 防火墙 Block 优先于 Allow，
+# 所以只能在 Block 规则里用「排除 53」的方式表达，不能再加一条 Allow 兜。
+function Get-UdpGuardRuleName([string]$instanceId) { "Claude Multi - block outbound UDP ($instanceId)" }
+
+function Test-IsElevated {
+  try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return (New-Object Security.Principal.WindowsPrincipal $id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  } catch { return $false }
+}
+
+function Write-UdpGuardNote([string]$instanceId, [string]$message) {
+  try {
+    New-Item -ItemType Directory -Force $HomeRoot | Out-Null
+    Add-Content -Path (Join-Path $HomeRoot 'launch-audit.log') -Encoding utf8 `
+      -Value ("{0}  GUARD  {1}  {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $instanceId, $message)
+  } catch { }
+}
+
+function Get-UdpGuardProgram([string]$instanceId) {
+  # 返回规则当前绑定的 exe；无规则返回 $null，规则在但读不到程序路径返回 ''
+  $rule = Get-NetFirewallRule -DisplayName (Get-UdpGuardRuleName $instanceId) -ErrorAction SilentlyContinue
+  if (-not $rule) { return $null }
+  $app = $rule | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue
+  if (-not $app) { return '' }
+  return [string]$app.Program
+}
+
+function Install-UdpLeakGuard([string]$instanceId, [string]$exePath) {
+  if (-not (Test-IsElevated)) { throw 'administrator rights are required to change firewall rules' }
+  $name = Get-UdpGuardRuleName $instanceId
+  Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+  $common = @{
+    DisplayName = $name; Direction = 'Outbound'; Program = $exePath; Protocol = 'UDP'
+    Action = 'Block'; Profile = 'Any'; Enabled = 'True'
+  }
+  try {
+    # 1-52 与 54-65535：等于「除 53 以外全部 UDP」
+    New-NetFirewallRule @common -RemotePort @('1-52', '54-65535') -ErrorAction Stop | Out-Null
+  } catch {
+    # 某些旧版模块不接受端口段数组，退回整段阻断（极少数情况下会拖慢 DNS，但绝不漏）
+    New-NetFirewallRule @common -ErrorAction Stop | Out-Null
+  }
+}
+
+function Ensure-UdpLeakGuard([string]$instanceId, [string]$exePath) {
+  # 幂等：已就位返回 present；缺失/路径过期则尝试安装；无提权时只记一条日志，绝不阻断启动。
+  if (-not $exePath -or -not (Test-Path -LiteralPath $exePath)) { return 'skip' }
+  $current = Get-UdpGuardProgram $instanceId
+  if ($current -and ($current -ieq $exePath)) { return 'present' }
+  if (-not (Test-IsElevated)) {
+    $why = if ($current) { "stale program '$current' (want '$exePath')" } else { 'missing' }
+    Write-UdpGuardNote $instanceId "UDP guard $why - run 'claude-multi.ps1 udp-guard' in an elevated shell to block WebRTC UDP"
+    return 'needs-admin'
+  }
+  Install-UdpLeakGuard $instanceId $exePath
+  Write-UdpGuardNote $instanceId "UDP guard installed for '$exePath' (all outbound UDP except 53 blocked)"
+  return 'installed'
+}
+
+function Invoke-UdpGuard([string]$OnlyId) {
+  # 手动入口：claude-multi.ps1 udp-guard [-Id <instance>]
+  # 应用升级后 WindowsApps 路径会带新版本号，旧规则会失效 —— 升级完跑一次即可。
+  $pkg = Get-ClaudePackage
+  $pkgExe = Join-Path $pkg.InstallLocation 'app\Claude.exe'
+  $targets = @((Read-Config).instances | Where-Object { $_.PSObject.Properties['proxy'] -and $_.proxy })
+  if ($OnlyId) { $targets = @($targets | Where-Object id -eq $OnlyId) }
+  if (-not $targets.Count) { 'no proxy-backed instance to guard'; return }
+  $rows = foreach ($i in $targets) {
+    $state = Ensure-UdpLeakGuard $i.id $pkgExe
+    [pscustomobject]@{ Id = $i.id; Program = $pkgExe; State = $state }
+  }
+  $rows | Format-Table -AutoSize
+}
+
 function Invoke-ProxyGeoQuery([string]$url, [string]$proxyUrl) {
   $raw = $null
   if ($proxyUrl) {
@@ -1311,13 +1397,25 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
       #   ppapi-plugin-launcher / nacl-loader-cmd-prefix / browser-subprocess-path
       # --proxy-server 不在名单内（官方支持自定义代理），故仅移除
       # --host-resolver-rules。隔离强度不降级：Chromium 在 HTTP 代理模式下由代理侧
-      # 解析域名、不发本地 DNS 查询；QUIC 与 WebRTC 仍由下方开关封堵。
+      # 解析域名、不发本地 DNS 查询。QUIC 由 --disable-quic 关掉；
+      # WebRTC 的裸 UDP 命令行关不住，改由 Ensure-UdpLeakGuard 在防火墙层封堵（见下）。
       $args_ += '--disable-quic'
-      $args_ += '--dns-prefetch-disable'
     }
-    $args_ += '--force-webrtc-ip-handling-policy'
-    $args_ += '--webrtc-ip-handling-policy=disable_non_proxied_udp'
-    $args_ += '--enforce-webrtc-ip-permission-check'
+    # 2026-11-03 修正：这里原本还加了
+    #   --force-webrtc-ip-handling-policy / --dns-prefetch-disable /
+    #   --webrtc-ip-handling-policy=disable_non_proxied_udp / --enforce-webrtc-ip-permission-check
+    # 四个开关，逐个在 Claude.exe 里 `grep -a` 核实后确认**前两个根本不存在**（Chromium 156 已移除，
+    # 写了只是静默忽略），后两个的 switch 字符串在二进制里也搜不到（Electron 未编译进去），
+    # 而 disable_non_proxied_udp 只以偏好值的形式存在于 app.asar，靠 Claude 自己写 Preferences，
+    # 且不下发给 renderer。也就是说这四条全是安慰剂，留着只会让人误以为已经封住了。
+    # 真正的封堵在 Ensure-UdpLeakGuard（防火墙按 exe 阻断出站 UDP），启动前调用。
+    # 若将来某个 Electron 版本真的编译进了 webrtc-ip-handling-policy，可以用
+    #   grep -a -o "webrtc-ip-handling-policy" Claude.exe
+    # 复核后再加回来 —— 判断依据是二进制里有没有这个字符串，而不是文档里写没写。
+    $udpTarget = if ($exe -eq $aliasExe) { $pkgExe } else { $exe }
+    if ((Read-Config).settings.udpGuard -ne $false) {
+      try { Ensure-UdpLeakGuard $i.id $udpTarget | Out-Null } catch { }
+    }
     $filt = Remove-BlockedSwitches $args_
     if ($filt.Dropped.Count -gt 0) {
       $args_ = $filt.Args

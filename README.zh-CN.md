@@ -25,7 +25,7 @@
 * **Prism 级防关联与网络隔离加固:**
   * **双源 GeoIP 共识校验与自动网络身份对齐:** 启动前通过实例代理并发探测 `ipwho.is` 与 `ipapi.co`,自动将 `TZ`、`--lang` 与 `Accept-Language`(基于 `COUNTRY_NETWORK_MAP`)对齐至出口国家/时区,持久化 `.proxy-identity.json`,并支持 `proxyExitPolicy: "block"` 在出口 IP 漂移或 GeoIP 冲突时直接阻断启动。
   * **运行时代理漂移熔断器(`shield.cjs`):** 通过 `NODE_OPTIONS` 注入 Node.js 网络防护层,后台定时复核出口 IP(`CLAUDE_MULTI_STARTUP_IP`),一旦代理掉线或出口 IP 发生漂移即刻触发 `_networkQuarantined` 熔断所有非本地 `http` / `https` / `fetch` 外发请求并记录 `.proxy-quarantine.log`。
-  * **Chromium DNS / QUIC / WebRTC 深度加固:** 注入 `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE localhost , EXCLUDE ::1"`、`--disable-quic`、`--dns-prefetch-disable`、`--enforce-webrtc-ip-permission-check`,并在启动前预写 `Default/Preferences`(强制 `disable_non_proxied_udp`)及清理残留 `DevToolsActivePort`。
+  * **Chromium DNS / QUIC / WebRTC 深度加固:** 注入 `--disable-quic`,并在启动前预写 `Default/Preferences`(`webrtc.ip_handling_policy = disable_non_proxied_udp`)及清理残留 `DevToolsActivePort`。**WebRTC 的裸 UDP 无法靠命令行封堵** —— `--force-webrtc-ip-handling-policy`、`--dns-prefetch-disable` 在 Chromium 156 里已不存在,`--webrtc-ip-handling-policy` 的 switch 字符串在 `Claude.exe` 里也搜不到,写进 `Preferences` 的偏好同样不下发 renderer;真正生效的是 `udp-guard`(防火墙按 exe 阻断出站 UDP),见下文「多官方账号支持与防风控隔离」第 5 条。
   * **配置目录身份锚点(`.profile-identity.json`):** 将每个 `user-data-dir` 与其所属 `instanceId` 强绑定并拒绝符号链接穿透,防止多账号配置目录交叉污染。
 
 ## Windows 快速开始
@@ -50,6 +50,7 @@ cd claude-desktop-multiple-windows-different-api
 | `check [-Id <id>]` (别名 `test-ip`) | 一键全量审计各实例出口IP、家宽/机房属性、欺诈分(0-100)、Claude官方区域支持状态与时区吻合度 |
 | `install [-Force]` | 重新生成图标和快捷方式;并改接你已固定的 Claude 快捷方式 |
 | `launch -Id gem` | 启动某个窗口 |
+| `udp-guard [-Id <id>]` | 装/修 WebRTC 裸 UDP 防护(按 exe 阻断出站 UDP 的防火墙规则),**需提权**;应用升级后重跑 |
 | `list`、`providers`、`sync`、`remove -Id gem`、`icons -Force`、`uninstall` | 日常维护 |
 
 ## macOS(v1.2.0)
@@ -100,6 +101,13 @@ python3 macos/claude_multi.py agent &             # 会话镜像 + 后台静默�
 4. **一键物理构建与环境审计 (`init` & `check`)**：
    - `.\claude-multi.ps1 init [-Id <id>]`：一键自动创建 Data 目录、镜像 MCP 工具链 (`claude_desktop_config.json`)、建立会话软链接 (`claude-code-sessions`) 并生成着色图标与快捷方式。
    - `.\claude-multi.ps1 check [-Id <id>]`：一键全量审计所有实例的出口 IP、住宅/机房属性、欺诈分 (0-100)、Claude 官方支持状态与时区吻合度。
+5. **裸 UDP 泄漏封堵 (`udp-guard`)**：`--proxy-server` 只代理 TCP，WebRTC 的 STUN 会从物理网卡直接打出去，把本机真实公网 IP 交给对端。命令行层关不住它 —— `--force-webrtc-ip-handling-policy` 在 Chromium 156 里已不存在（写了静默忽略），`--webrtc-ip-handling-policy` 的 switch 字符串在 `Claude.exe` 二进制里也搜不到（Electron 未编译进去），写进 `Preferences` 的 `webrtc.ip_handling_policy` 也不会下发给 renderer。真正有效的是**按 exe 阻断出站 UDP** 的防火墙规则：
+
+   ```powershell
+   .\claude-multi.ps1 udp-guard [-Id <id>]   # 需在提权的 PowerShell 里执行
+   ```
+
+   规则只针对 Claude 宿主的 `Claude.exe`（放行 53/UDP 以免把名字解析一起掐死），同机其它程序不受影响。验证方式：封堵后向 `stun.l.google.com:19302` 发 STUN Binding Request 应全部超时。**注意应用升级后 WindowsApps 路径里的版本号会变、旧规则随之失效**，升级完重跑一次即可；日常启动也会自动校验，路径对不上会往 `~/.claude-multi/launch-audit.log` 写一条 `GUARD` 记录。设 `"settings": { "udpGuard": false }` 可关闭自动校验。
 
 ## 配合 cc-switch 使用
 

@@ -1585,15 +1585,21 @@ function Get-SessionFolders {
     foreach ($a in [IO.Directory]::GetDirectories($cs)) { foreach ($o in [IO.Directory]::GetDirectories($a)) { if ($o -notmatch '-backup$') { [pscustomobject]@{ Path = $o; Id = $i.id } } } }
   }
 }
-function Backup-Sessions {
-  $flag = Join-Path $StateDir 'sessions-backed-up'
-  if (Test-Path $flag) { return }
-  $dst = Join-Path $StateDir ('backup-sessions\' + (Get-Date -Format yyyyMMdd-HHmmss)); $n = 0
-  foreach ($i in (Read-Config).instances) {
-    $cs = Join-Path (Get-StoreRoot $i) 'claude-code-sessions'
-    if (Test-Path $cs) { robocopy $cs (Join-Path $dst ('s' + $n++)) /E /NFL /NDL /NJH /NJS /NP | Out-Null }
+function Backup-Sessions {   # rolling: one snapshot per calendar day, the newest 7 are kept (session files are never deleted)
+  $root = Join-Path $StateDir 'backup-sessions'
+  $dst = Join-Path $root ('daily-' + (Get-Date -Format yyyyMMdd))
+  $stores = 0
+  if (-not (Test-Path $dst)) {
+    New-Item -ItemType Directory -Force $dst | Out-Null
+    $n = 0
+    foreach ($i in (Read-Config).instances) {
+      $cs = Join-Path (Get-StoreRoot $i) 'claude-code-sessions'
+      if (Test-Path $cs) { robocopy $cs (Join-Path $dst ('s' + $n++)) /E /XJ /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null; $stores++ }
+    }
   }
-  New-Item -ItemType File -Force $flag | Out-Null
+  $keep = @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'daily-*' } | Sort-Object Name -Descending)
+  if ($stores) { try { [IO.File]::WriteAllText((Join-Path $dst '_meta.txt'), ((Get-Date -Format s) + "  stores=" + $stores), (New-Object Text.UTF8Encoding $false)) } catch { } }
+  foreach ($d in @($keep | Select-Object -Skip 7)) { Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
 # Newest-wins mirror of every session file into every account/org folder of every instance (never deletes).
 function Invoke-SessionSync {

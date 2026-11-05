@@ -24,6 +24,15 @@
                           "proxy":  "http://127.0.0.1:27892",
                           "timezone":  "America/Los_Angeles",
                           "proxyExitPolicy":  "block"
+                      },
+                      {
+                          "id":  "official3",
+                          "name":  "Claude Official 3",
+                          "kind":  "official",
+                          "palette":  "gpt",
+                          "proxy":  "http://127.0.0.1:27896",
+                          "timezone":  "America/Toronto",
+                          "proxyExitPolicy":  "block"
                       }
                   ],
     "settings":  {

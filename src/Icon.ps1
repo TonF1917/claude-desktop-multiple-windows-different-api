@@ -2,9 +2,45 @@
 Add-Type -AssemblyName System.Drawing
 
 function Get-ClaudePackage {
-  $p = Get-AppxPackage AnthropicPBC.Claude | Sort-Object Version -Descending | Select-Object -First 1
-  if (-not $p) { throw 'Claude Desktop (MSIX, AnthropicPBC.Claude) is not installed.' }
-  $p
+  # 解析顺序（不写死包名，任一命中即返回）：
+  #   1) 拥有已落盘执行别名的包 —— 这是 launcher 真正启动的通道，必须最优先
+  #   2) 旧标识 AnthropicPBC.Claude（Microsoft Store 渠道，历史上一直是这个）
+  #   3) 任何名字含 Claude 且真的有 app\Claude.exe 的包
+  #
+  # 2026-11-11 教训：5.1231.2 同时存在两套包标识 ——
+  #   AnthropicPBC.Claude_fnn82j28hfe8t（Store，Publisher=CN=0ED83B57-…）
+  #   Claude_pzs8sxrjxfjjc（官方直装，Publisher=CN="Anthropic, PBC"…）
+  # 旧代码写死 Get-AppxPackage AnthropicPBC.Claude，官方一旦弃用旧标识就直接抛异常。
+  $all = @(Get-AppxPackage | Where-Object { $_.Name -like '*Claude*' -and $_.InstallLocation } |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_.InstallLocation 'app\Claude.exe') })
+  if (-not $all.Count) { throw 'Claude Desktop (MSIX) is not installed.' }
+
+  $aliasDir = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+  $aliasCandidates = @('claude-desktop-msstore.exe', 'claude-desktop.exe')
+
+  foreach ($a in $aliasCandidates) {
+    if (-not (Test-Path -LiteralPath (Join-Path $aliasDir $a))) { continue }
+    foreach ($p in $all) {
+      $manifest = Join-Path $p.InstallLocation 'AppxManifest.xml'
+      if (-not (Test-Path -LiteralPath $manifest)) { continue }
+      $raw = Get-Content -LiteralPath $manifest -Raw -ErrorAction SilentlyContinue
+      if ($raw -and $raw.Contains($a)) { return $p }
+    }
+  }
+
+  $legacy = $all | Where-Object { $_.Name -eq 'AnthropicPBC.Claude' } | Sort-Object Version -Descending | Select-Object -First 1
+  if ($legacy) { return $legacy }
+  $all | Sort-Object Version -Descending | Select-Object -First 1
+}
+
+function Get-ClaudeAliasExe {
+  # 返回 launcher 应当使用的执行别名（存在才返回），否则空串。
+  $aliasDir = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+  foreach ($a in @('claude-desktop-msstore.exe', 'claude-desktop.exe')) {
+    $p = Join-Path $aliasDir $a
+    if (Test-Path -LiteralPath $p) { return $p }
+  }
+  ''
 }
 
 function Resolve-Palette($spec, $palettes) {

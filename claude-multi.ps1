@@ -100,6 +100,13 @@ switch ($Command) {
       }
     }
     $k = 'HKCU:\Software\Classes\claude\shell\open\command'
-    if (Test-Path $k) { Set-ItemProperty $k -Name '(default)' -Value "`"$((Get-ClaudePackage).InstallLocation)\app\Claude.exe`" `"%1`""; 'restored: claude:// handler' }
+    if (Test-Path $k) {
+      # 恢复时优先用执行别名（跨版本稳定）；WindowsApps 下带版本号的裸 exe 路径
+      # 每次应用升级都会失效，2026-11-11 的 5.1231.2 就是这么把旧路径作废的。
+      $restoreExe = Get-ClaudeAliasExe
+      if (-not $restoreExe) { $restoreExe = Join-Path (Get-ClaudePackage).InstallLocation 'app\Claude.exe' }
+      Set-ItemProperty $k -Name '(default)' -Value "`"$restoreExe`" `"%1`""
+      'restored: claude:// handler'
+    }
   }
 }

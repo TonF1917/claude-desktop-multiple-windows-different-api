@@ -1291,8 +1291,10 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
   # "Access is denied" (ACLs unchanged - policy tightening on direct package-exe
   # launches). The app execution alias is the sanctioned activation path and
   # forwards the command line unchanged, so prefer it when present.
-  $aliasExe = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\claude-desktop-msstore.exe'
-  if (Test-Path $aliasExe) { $exe = $aliasExe }
+  # 2026-11-11: 别名不再只认 claude-desktop-msstore.exe —— 新包标识
+  # (Claude_pzs8sxrjxfjjc) 只注册了 claude-desktop.exe，两个都试。
+  $aliasExe = Get-ClaudeAliasExe
+  if ($aliasExe) { $exe = $aliasExe }
   $chatFont = if ($i.PSObject.Properties['chatFont'] -and $i.chatFont) { ([string]$i.chatFont).Trim().ToLowerInvariant() } else { '' }
   if ($chatFont) {
     $patchedExe = Ensure-PatchedClaudeRuntime -SourceExe $pkgExe -ChatFont $chatFont
@@ -1807,12 +1809,30 @@ function Invoke-Doctor {
     Write-Host "[PASS] Claude Desktop: Found Microsoft Store execution alias at $aliasExe" -ForegroundColor Green
     $passes++
   } elseif ($hasPkg) {
-    Write-Host "[PASS] Claude Desktop: Found MSStore package AnthropicPBC.ClaudeDesktop" -ForegroundColor Green
+    Write-Host "[PASS] Claude Desktop: Found MSIX package $($pkg.PackageFamilyName) $($pkg.Version)" -ForegroundColor Green
     $passes++
   } else {
     Write-Host "[FAIL] Claude Desktop: Not found at $claudeExe" -ForegroundColor Red
     Write-Host "       Remediation: Install Claude Desktop from https://claude.ai/download" -ForegroundColor Yellow
     $fails++
+  }
+
+  # 2b. 多包标识漂移：2026-11-11 起 Store 渠道与官方直装渠道会各自装一套包
+  #     (AnthropicPBC.Claude_fnn82j28hfe8t / Claude_pzs8sxrjxfjjc)，同版本共存。
+  #     两者都有 app\Claude.exe，只有一个拥有 claude-desktop-msstore.exe 别名。
+  #     不阻断，但必须显式提示 —— 否则出问题时看不出到底跑的是哪一套。
+  $claudePkgs = @(Get-AppxPackage | Where-Object { $_.Name -like '*Claude*' } |
+    Where-Object { $_.InstallLocation -and (Test-Path -LiteralPath (Join-Path $_.InstallLocation 'app\Claude.exe')) })
+  if ($claudePkgs.Count -gt 1) {
+    Write-Host "[WARN] Claude Desktop: $($claudePkgs.Count) package identities installed - the launch target is decided by alias ownership" -ForegroundColor Yellow
+    foreach ($cp in ($claudePkgs | Sort-Object Name)) {
+      $owns = if (Test-Path -LiteralPath (Join-Path $cp.InstallLocation 'AppxManifest.xml')) {
+        $raw = Get-Content -LiteralPath (Join-Path $cp.InstallLocation 'AppxManifest.xml') -Raw -ErrorAction SilentlyContinue
+        @('claude-desktop-msstore.exe', 'claude-desktop.exe') | Where-Object { $raw -and $raw.Contains($_) }
+      }
+      Write-Host ("       {0}  {1}  alias=[{2}]" -f $cp.Name, $cp.Version, ($owns -join ', ')) -ForegroundColor DarkGray
+    }
+    $warns++
   }
 
   # 3. cc-switch directory / config

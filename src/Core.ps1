@@ -1478,6 +1478,19 @@ function Invoke-Launch($i, [string]$Url, [switch]$NoAgent, [switch]$Minimized, [
         Start-Sleep -Milliseconds 250
       }
     }
+  } else {
+    # 2026-11-11: 这个 else 是补的。原来 -Minimized 直接跳过上面整段自检 + 审计，
+    # 而 Restart-Instance 恰恰用 -Minimized 调 Invoke-Launch —— 于是 restart（人工恢复
+    # 最常用的路径）在 launch-audit.log 里一行都不留，手册让人"取证看 launch-audit"
+    # 就完全落空。这里只补进程级判定，不做窗口激活。
+    $root = $null
+    for ($k = 0; $k -lt 48; $k++) {
+      $r = @(Get-Roots $i) | Select-Object -First 1
+      if ($r) { $root = $r; break }
+      Start-Sleep -Milliseconds 250
+    }
+    if ($root) { Write-LaunchAudit $i $true '' }
+    else { Write-LaunchAudit $i $false 'launched minimized but no root process appeared within 12s' }
   }
 }
 

@@ -110,11 +110,17 @@ Get-AppxPackage AnthropicPBC.Claude | Select-Object Name, Version, InstallLocati
    .\claude-multi.ps1 doctor
    ```
 
-2. **先关掉安装器自启的游离实例**。判据是主进程命令行里**没有** `--proxy-server`：
+2. **先关掉安装器自启的游离实例**。判据是主进程命令行里**没有** `--proxy-server`，
+   且镜像来自 `WindowsApps`（必须加这条——桌面版内嵌的 Claude Code CLI 也叫
+   `claude.exe`、也没有 `--proxy-server`，只按进程名筛会误杀）：
 
    ```powershell
    Get-CimInstance Win32_Process -Filter "Name='claude.exe'" |
-     Where-Object { $_.CommandLine -notmatch '--type=' -and $_.CommandLine -notmatch '--proxy-server' } |
+     Where-Object {
+       $_.CommandLine -notmatch '--type=' -and
+       $_.CommandLine -notmatch '--proxy-server' -and
+       $_.ExecutablePath -like 'C:\Program Files\WindowsApps\*\app\Claude.exe'
+     } |
      ForEach-Object { "STRAY pid=$($_.ProcessId)  $($_.CommandLine)" }
    ```
 

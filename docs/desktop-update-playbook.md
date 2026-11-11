@@ -5,16 +5,15 @@
 
 ## 1. 前置事实：更新粒度只能是全量
 
-Windows 上 Claude Desktop 通过 MSIX（`AnthropicPBC.Claude`）安装。本机上多个窗口
+Windows 上 Claude Desktop 通过 MSIX 安装。本机上多个窗口
 （`official` / `official2` / `official3` / 3p）**共享同一个包**：
 
 - 所有 `Claude.exe` 进程的 `ExecutablePath` 指向同一个
-  `C:\Program Files\WindowsApps\AnthropicPBC.Claude_<version>_x64__<pfn>\app\Claude.exe`；
+  `C:\Program Files\WindowsApps\<pkgname>_<version>_x64__<pfn>\app\Claude.exe`；
 - `%LOCALAPPDATA%\Microsoft\WindowsApps\claude-desktop-msstore.exe` 是指向该 `app\Claude.exe`
   的执行别名（符号链接）；
-- `src/Icon.ps1` 的 `Get-ClaudePackage` 用
-  `Get-AppxPackage AnthropicPBC.Claude | Sort-Object Version -Descending | Select-Object -First 1`
-  动态取最高版本。
+- `src/Icon.ps1` 的 `Get-ClaudePackage` 按**别名归属**解析包（见下），再按旧名
+  `AnthropicPBC.Claude`、任意 `*Claude*` 包逐级回退。
 
 实例之间的差异**只在启动参数**：各自的 `--user-data-dir`、`--proxy-server`、
 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 与 `TZ`（见 `instances.json` 与 `src/Core.ps1`
@@ -23,8 +22,22 @@ Windows 上 Claude Desktop 通过 MSIX（`AnthropicPBC.Claude`）安装。本机
 > Store / MSIX 更新一次，整机唯一的二进制被替换，所有实例下次启动全部是新版。
 > **不存在「只更新一个 official」的做法。** 横幅只在一个窗口弹出不代表只影响那一个。
 
+### 1.1 双包标识（2026-11-11 实测，务必知道）
+
+5.1231.2 起，两条更新渠道会在同一台机器上留下**两套包标识、同一版本号**：
+
+| 包标识 | Publisher | 执行别名 | 来自 |
+| :--- | :--- | :--- | :--- |
+| `AnthropicPBC.Claude_fnn82j28hfe8t` | `CN=0ED83B57-1FA9-465C-98F8-41F190D0DF7F` | `claude-desktop-msstore.exe` | Microsoft Store |
+| `Claude_pzs8sxrjxfjjc` | `CN="Anthropic, PBC"…SERIALNUMBER=4860621` | `claude-desktop.exe`、`claude-ssh-*` | 官方直装 `ClaudeSetup.exe` |
+
+两者的 `app\Claude.exe` 都存在且都叫 `Claude.exe`，**launcher 走哪个完全由别名归属决定**。
+`Get-ClaudePackage` 因此优先选「拥有已落盘别名」的那个包。`doctor` 在检测到多于一个
+标识时会打 `[WARN]` 并列出各自拥有的别名——看到这个 WARN 不代表坏了，但要知道
+另一套包也在磁盘上（约 300 MB），且它有自己的开始菜单入口。
+
 若确实需要按实例锁版本，必须脱离 MSIX 为每个实例安装独立副本，并同时改造
-`Get-ClaudePackage`、图标来源、`claude://` handler 与快捷方式——属于架构变更，另行评估。
+包解析、图标来源、`claude://` handler 与快捷方式——属于架构变更，另行评估。
 
 注意：Store 版会周期性自动检查更新。需要推迟升级时，不要依赖「不点 Update」，
 应暂停 Store 自动更新；本手册不代为修改系统更新策略。
@@ -60,10 +73,16 @@ Windows 上 Claude Desktop 通过 MSIX（`AnthropicPBC.Claude`）安装。本机
    `Find-BlockedSwitch` 探测 + 自动重试兜底。新版若扩充黑名单（尤其若触及
    `--proxy-server` 或 `--user-data-dir`），所有实例会同时拒绝启动。
    表现是「双击没反应」，取证看 `launch-audit.log` 的 `DROP` 行与自检输出。
-2. **升级后自动重开的窗口不是隔离实例**：MSIX 更新会关闭运行中的应用，Windows
-   可能自动重新打开 Claude。该进程不带 `--user-data-dir`、不带 `--proxy-server`、
-   不带 `NODE_OPTIONS`，会回落到系统代理或直连。**配置没有被改，是进程不是由
-   launcher 拉起的**，但风控效果等价于隔离失效。必须忽略该窗口。
+2. **升级后自动重开的窗口不是隔离实例，而且会占用 3p 的数据目录**：`ClaudeSetup.exe`
+   安装成功后必定调 `explorer.exe shell:AppsFolder\<AUMID>` 把应用拉起来。该进程不带
+   `--user-data-dir`、不带 `--proxy-server`、不带 `NODE_OPTIONS`。Electron 的默认
+   `userData` 恰好解析到 `%LOCALAPPDATA%\Claude-3p`——**正是 `instances.json` 里 `3p`
+   实例使用的目录**。所以它不是一个无害的空白profile，而是**用 3p 的登录态裸跑**。
+   **配置没有被改，是进程不是由 launcher 拉起的**，但风控效果等价于隔离失效。
+   引导器没有 `--no-launch` 之类开关（5.1231.2 二进制字符串核实：只有 `--msix`、
+   `--msix-path`、`--exe`、`--all-users`、`--lang`、`--log-path`、`--uninstall`、
+   `--elevated`、`--from-app`），所以只能事后关掉。
+   根治方向是把 `3p` 的 `--user-data-dir` 迁出默认路径（需迁移登录态，另行评估）。
 
 ## 4. 标准流程
 
@@ -85,15 +104,33 @@ Get-AppxPackage AnthropicPBC.Claude | Select-Object Name, Version, InstallLocati
 
 ### 4.3 更新后（按顺序，缺一不可）
 
-1. 确认新包版本与新的 `InstallLocation`。
-2. **在提权 PowerShell 中**重建防火墙规则——这是必做项：
+1. 确认新包版本与新的 `InstallLocation`，并看 `doctor` 是否打出双标识 `[WARN]`：
+
+   ```powershell
+   .\claude-multi.ps1 doctor
+   ```
+
+2. **先关掉安装器自启的游离实例**。判据是主进程命令行里**没有** `--proxy-server`：
+
+   ```powershell
+   Get-CimInstance Win32_Process -Filter "Name='claude.exe'" |
+     Where-Object { $_.CommandLine -notmatch '--type=' -and $_.CommandLine -notmatch '--proxy-server' } |
+     ForEach-Object { "STRAY pid=$($_.ProcessId)  $($_.CommandLine)" }
+   ```
+
+   逐个 `Stop-Process -Id <pid>`。这一步必须做——它用的是 3p 的登录态且没有代理。
+
+3. **在提权 PowerShell 中**核对/重建防火墙规则：
 
    ```powershell
    .\claude-multi.ps1 udp-guard
    ```
 
-   三条规则会分别重建到新 `Claude.exe` 路径。不加 `-Id` 即覆盖所有带 `proxy` 的实例。
-3. 用 launcher 逐个重拉实例，**不要**用开始菜单 / 任务栏 / 自动弹出的窗口：
+   三条规则会分别对齐到新 `Claude.exe` 路径。不加 `-Id` 即覆盖所有带 `proxy` 的实例。
+   注意：2026-11-11 这次实测中，规则在 MSIX 完成服务后**已经被系统自动改指到新路径**
+   （注册表 `App=` 字段确认为新版），但这属于无法保证的行为——`Manual` 策略存储、
+   `Package` 字段为空，纯路径匹配。**仍然每次都要跑这一步确认。**
+4. 用 launcher 逐个重拉实例，**不要**用开始菜单 / 任务栏 / 自动弹出的窗口：
 
    ```powershell
    .\claude-multi.ps1 restart -Id official
@@ -103,7 +140,7 @@ Get-AppxPackage AnthropicPBC.Claude | Select-Object Name, Version, InstallLocati
 
    重启时 `Write-ShieldScript` 会用 `Core.ps1` 内的模板重写各实例的 `shield.cjs`，
    因此模板与运行副本天然同步；若手工改过任一副本，重启后会被模板覆盖。
-4. 运行只读检查，要求全部 `[OK]`：
+5. 运行只读检查，要求全部 `[OK]`：
 
    ```powershell
    .\scripts\check-update-guard.ps1

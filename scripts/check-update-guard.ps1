@@ -21,20 +21,50 @@ Remediation for STALE rules (requires elevation):
 #>
 [CmdletBinding()]
 param(
-  [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
+  # 注意：不要在 param() 默认值里用 $PSScriptRoot —— Windows PowerShell 5.1 在
+  # 求值参数默认值的那一刻它还是空的，Split-Path -Parent '' 会直接抛
+  # "Cannot bind argument to parameter 'Path' because it is an empty string"，
+  # 脚本连第一行都跑不到。默认值留空，进函数体再解析。
+  [string]$RepoRoot,
   [string]$HomeRoot = (Join-Path $env:USERPROFILE '.claude-multi')
 )
+
+if (-not $RepoRoot) {
+  if ($PSScriptRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
+  else { $RepoRoot = (Get-Location).Path }
+}
 
 $ErrorActionPreference = 'Stop'
 $problems = 0
 
 function Get-ExpectedExe {
-  $pkg = Get-AppxPackage AnthropicPBC.Claude |
-         Sort-Object Version -Descending | Select-Object -First 1
-  if (-not $pkg) { throw 'MSIX package AnthropicPBC.Claude not found' }
+  # 与 src/Icon.ps1 的 Get-ClaudePackage 保持同一套解析顺序：先按执行别名归属，
+  # 再退回旧名 AnthropicPBC.Claude，最后任意 *Claude* 包。5.1231.2 起同版本会
+  # 同时存在两套包标识，写死旧名会在旧标识被弃用时误报 'package not found'。
+  $aliasDir = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+  $all = @(Get-AppxPackage | Where-Object { $_.Name -like '*Claude*' -and $_.InstallLocation } |
+           Where-Object { Test-Path -LiteralPath (Join-Path $_.InstallLocation 'app\Claude.exe') })
+  if (-not $all.Count) { throw 'no Claude MSIX package found' }
+
+  $pkg = $null
+  foreach ($a in @('claude-desktop-msstore.exe', 'claude-desktop.exe')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $aliasDir $a))) { continue }
+    foreach ($p in $all) {
+      $mf = Join-Path $p.InstallLocation 'AppxManifest.xml'
+      if (-not (Test-Path -LiteralPath $mf)) { continue }
+      $raw = Get-Content -LiteralPath $mf -Raw -ErrorAction SilentlyContinue
+      if ($raw -and $raw.Contains($a)) { $pkg = $p; break }
+    }
+    if ($pkg) { break }
+  }
+  if (-not $pkg) {
+    $pkg = $all | Where-Object { $_.Name -eq 'AnthropicPBC.Claude' } | Sort-Object Version -Descending | Select-Object -First 1
+  }
+  if (-not $pkg) { $pkg = $all | Sort-Object Version -Descending | Select-Object -First 1 }
+
   $exe = Join-Path $pkg.InstallLocation 'app\Claude.exe'
   if (-not (Test-Path -LiteralPath $exe)) { throw "package exe missing: $exe" }
-  [pscustomobject]@{ Version = [string]$pkg.Version; Exe = $exe }
+  [pscustomobject]@{ Version = [string]$pkg.Version; Exe = $exe; Family = $pkg.PackageFamilyName }
 }
 
 function Get-InstanceIds {

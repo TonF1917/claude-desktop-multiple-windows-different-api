@@ -465,8 +465,13 @@ if (typeof globalThis.fetch === 'function') {
 
 function probeExitIpOnce(url, cb) {
   const curlBin = process.platform === 'win32' ? 'curl.exe' : 'curl';
-  execFile(curlBin, ['-x', PROXY_URL, '-s', '--max-time', '6', url], { timeout: 7000, maxBuffer: 65536 }, (err, stdout) => {
-    if (err || !stdout) return cb(null);
+  // 2026-11-09: measured residential-chain probe latency is 2.7-5.87s, one
+  // sample hit 5.874s against the old 6s cap. 15s leaves headroom WITHOUT
+  // weakening isolation: a probe that completes is what DETECTS exit-IP drift.
+  // curl.exe on Windows may exit non-zero yet still emit a valid JSON body;
+  // trust the parsed body, not the exit code. Quarantine remains one-way.
+  execFile(curlBin, ['-x', PROXY_URL, '-s', '--max-time', '15', url], { timeout: 16000, maxBuffer: 65536 }, (err, stdout) => {
+    if (!stdout) return cb(null);
     try {
       const data = JSON.parse(stdout);
       const ip = String(data.ip || '').trim();
